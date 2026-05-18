@@ -47,7 +47,6 @@ _FIELD_CONFIGS = [
     "num_materials",
     "material",
   ),
-  _FieldConfig("pair_names", "pair_ids", "find_pairs", "num_pairs", "pair"),
 ]
 
 
@@ -117,12 +116,6 @@ class SceneEntityCfg:
   material_ids: list[int] | slice = field(default_factory=lambda: slice(None))
   """IDs of materials to include. Can be a list or slice."""
 
-  pair_names: str | tuple[str, ...] | None = None
-  """Names of contact pairs to include. Can be a single string or tuple."""
-
-  pair_ids: list[int] | slice = field(default_factory=lambda: slice(None))
-  """IDs of contact pairs to include. Can be a list or slice."""
-
   preserve_order: bool = False
   """If True, maintains the order of components as specified."""
 
@@ -168,37 +161,32 @@ class SceneEntityCfg:
 
     # Normalize single values to lists for uniform processing.
     names = self._normalize_to_list(names)
+    if names is not None:
+      setattr(self, config.names_attr, names)
+
     if isinstance(ids, (int, list)):
       ids = self._normalize_to_list(ids)
       setattr(self, config.ids_attr, ids)
 
     # Handle three resolution cases.
     if names is not None and isinstance(ids, list):
-      setattr(self, config.names_attr, names)
       self._validate_consistency(
         names, ids, entity_all_names, find_method, config.kind_label
       )
     elif names is not None:
       self._resolve_names_to_ids(
-        names,
-        entity_all_names,
-        entity_count,
-        find_method,
-        config.names_attr,
-        config.ids_attr,
+        names, entity_all_names, entity_count, find_method, config.ids_attr
       )
     elif isinstance(ids, list):
       self._resolve_ids_to_names(ids, entity_all_names, config.names_attr)
 
-  def _normalize_to_list(self, value: str | int | tuple | list | None) -> list | None:
+  def _normalize_to_list(self, value: str | int | list | None) -> list | None:
     """Convert single values to lists for uniform processing."""
     if value is None:
       return None
     if isinstance(value, (str, int)):
       return [value]
-    if isinstance(value, list):
-      return value
-    return list(value)
+    return value
 
   def _validate_consistency(
     self,
@@ -229,17 +217,13 @@ class SceneEntityCfg:
     entity_all_names: list[str],
     entity_count: int,
     find_method,
-    names_attr: str,
     ids_attr: str,
   ) -> None:
     """Resolve names to IDs, optimizing to slice(None) when all are selected."""
-    found_ids, found_names = find_method(names, preserve_order=self.preserve_order)
-
-    # Keep names and IDs in the same order.
-    setattr(self, names_attr, found_names)
+    found_ids, _ = find_method(names, preserve_order=self.preserve_order)
 
     # Optimize to slice(None) if all components are selected in order.
-    if len(found_ids) == entity_count and found_names == list(entity_all_names):
+    if len(found_ids) == entity_count and names == entity_all_names:
       setattr(self, ids_attr, slice(None))
     else:
       setattr(self, ids_attr, found_ids)

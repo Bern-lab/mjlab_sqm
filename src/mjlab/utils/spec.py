@@ -1,7 +1,5 @@
 """MjSpec utils."""
 
-from __future__ import annotations
-
 import shutil
 import xml.etree.ElementTree as ET
 import zipfile
@@ -13,54 +11,6 @@ import numpy as np
 
 from mjlab.actuator.actuator import TransmissionType
 from mjlab.utils.xml import fix_spec_xml, strip_buffer_textures
-
-_DEFAULT_SPEC_OPTION = mujoco.MjSpec().option
-
-_OPTION_FIELDS = (
-  "ccd_iterations",
-  "ccd_tolerance",
-  "cone",
-  "density",
-  "disableactuator",
-  "disableflags",
-  "enableflags",
-  "gravity",
-  "impratio",
-  "integrator",
-  "iterations",
-  "jacobian",
-  "ls_iterations",
-  "ls_tolerance",
-  "magnetic",
-  "noslip_iterations",
-  "noslip_tolerance",
-  "o_friction",
-  "o_margin",
-  "o_solimp",
-  "o_solref",
-  "sdf_initpoints",
-  "sdf_iterations",
-  "sleep_tolerance",
-  "solver",
-  "timestep",
-  "tolerance",
-  "viscosity",
-  "wind",
-)
-
-
-def non_default_option_fields(opt: mujoco._specs.MjOption) -> list[str]:
-  """Return option field names that differ from MjSpec defaults."""
-  diffs = []
-  for name in _OPTION_FIELDS:
-    default = getattr(_DEFAULT_SPEC_OPTION, name)
-    value = getattr(opt, name)
-    if isinstance(default, np.ndarray):
-      if not np.array_equal(default, value):
-        diffs.append(name)
-    elif default != value:
-      diffs.append(name)
-  return diffs
 
 
 def export_spec(
@@ -215,9 +165,8 @@ def create_motor_actuator(
   *,
   effort_limit: float,
   gear: float = 1.0,
-  armature: float | None = None,
-  frictionloss: float | None = None,
-  viscous_damping: float | None = None,
+  armature: float = 0.0,
+  frictionloss: float = 0.0,
   transmission_type: TransmissionType = TransmissionType.JOINT,
 ) -> mujoco.MjsActuator:
   """Create a <motor> actuator."""
@@ -235,21 +184,13 @@ def create_motor_actuator(
   actuator.ctrllimited = True
   actuator.ctrlrange[:] = np.array([-effort_limit, effort_limit])
 
-  # Set armature, frictionloss, and viscous_damping (None = preserve XML value).
+  # Set armature and frictionloss.
   if transmission_type == TransmissionType.JOINT:
-    if armature is not None:
-      spec.joint(joint_name).armature = armature
-    if frictionloss is not None:
-      spec.joint(joint_name).frictionloss = frictionloss
-    if viscous_damping is not None:
-      spec.joint(joint_name).damping[0] = viscous_damping
+    spec.joint(joint_name).armature = armature
+    spec.joint(joint_name).frictionloss = frictionloss
   elif transmission_type == TransmissionType.TENDON:
-    if armature is not None:
-      spec.tendon(joint_name).armature = armature
-    if frictionloss is not None:
-      spec.tendon(joint_name).frictionloss = frictionloss
-    if viscous_damping is not None:
-      spec.tendon(joint_name).damping[0] = viscous_damping
+    spec.tendon(joint_name).armature = armature
+    spec.tendon(joint_name).frictionloss = frictionloss
 
   return actuator
 
@@ -261,9 +202,8 @@ def create_position_actuator(
   stiffness: float,
   damping: float,
   effort_limit: float | None = None,
-  armature: float | None = None,
-  frictionloss: float | None = None,
-  viscous_damping: float | None = None,
+  armature: float = 0.0,
+  frictionloss: float = 0.0,
   transmission_type: TransmissionType = TransmissionType.JOINT,
 ) -> mujoco.MjsActuator:
   """Creates a <position> actuator.
@@ -314,21 +254,13 @@ def create_position_actuator(
     actuator.forcelimited = False
     # No forcerange needed.
 
-  # Set armature, frictionloss, and viscous_damping (None = preserve XML value).
+  # Set armature and frictionloss.
   if transmission_type == TransmissionType.JOINT:
-    if armature is not None:
-      spec.joint(joint_name).armature = armature
-    if frictionloss is not None:
-      spec.joint(joint_name).frictionloss = frictionloss
-    if viscous_damping is not None:
-      spec.joint(joint_name).damping[0] = viscous_damping
+    spec.joint(joint_name).armature = armature
+    spec.joint(joint_name).frictionloss = frictionloss
   elif transmission_type == TransmissionType.TENDON:
-    if armature is not None:
-      spec.tendon(joint_name).armature = armature
-    if frictionloss is not None:
-      spec.tendon(joint_name).frictionloss = frictionloss
-    if viscous_damping is not None:
-      spec.tendon(joint_name).damping[0] = viscous_damping
+    spec.tendon(joint_name).armature = armature
+    spec.tendon(joint_name).frictionloss = frictionloss
 
   return actuator
 
@@ -339,9 +271,8 @@ def create_velocity_actuator(
   *,
   damping: float,
   effort_limit: float | None = None,
-  armature: float | None = None,
-  frictionloss: float | None = None,
-  viscous_damping: float | None = None,
+  armature: float = 0.0,
+  frictionloss: float = 0.0,
   transmission_type: TransmissionType = TransmissionType.JOINT,
 ) -> mujoco.MjsActuator:
   """Creates a <velocity> actuator.
@@ -369,21 +300,12 @@ def create_velocity_actuator(
   else:
     actuator.forcelimited = False
 
-  # Set armature, frictionloss, and viscous_damping (None = preserve XML value).
   if transmission_type == TransmissionType.JOINT:
-    if armature is not None:
-      spec.joint(joint_name).armature = armature
-    if frictionloss is not None:
-      spec.joint(joint_name).frictionloss = frictionloss
-    if viscous_damping is not None:
-      spec.joint(joint_name).damping[0] = viscous_damping
+    spec.joint(joint_name).armature = armature
+    spec.joint(joint_name).frictionloss = frictionloss
   elif transmission_type == TransmissionType.TENDON:
-    if armature is not None:
-      spec.tendon(joint_name).armature = armature
-    if frictionloss is not None:
-      spec.tendon(joint_name).frictionloss = frictionloss
-    if viscous_damping is not None:
-      spec.tendon(joint_name).damping[0] = viscous_damping
+    spec.tendon(joint_name).armature = armature
+    spec.tendon(joint_name).frictionloss = frictionloss
 
   return actuator
 
@@ -433,86 +355,3 @@ def create_muscle_actuator(
   actuator.ctrlrange[:] = np.array([0.0, 1.0])
 
   return actuator
-
-
-# ---------------------------------------------------------------------------
-# Mesh variant helpers
-# ---------------------------------------------------------------------------
-
-
-def copy_mesh_data(src: mujoco.MjsMesh, dst: mujoco.MjsMesh) -> None:
-  """Copy mesh geometry from *src* to *dst*.
-
-  Copies vertex/face data, file path, scale, reference frame, and smoothing settings.
-  The ``name`` field is NOT copied; set it on *dst* before calling.
-  """
-  assert dst.name, "dst.name must be set before copy_mesh_data."
-  if src.file:
-    dst.file = src.file
-  if len(src.uservert) > 0:
-    dst.uservert = src.uservert
-  if len(src.userface) > 0:
-    dst.userface = src.userface
-  if len(src.usernormal) > 0:
-    dst.usernormal = src.usernormal
-  if len(src.usertexcoord) > 0:
-    dst.usertexcoord = src.usertexcoord
-  if len(src.userfacenormal) > 0:
-    dst.userfacenormal = src.userfacenormal
-  if len(src.userfacetexcoord) > 0:
-    dst.userfacetexcoord = src.userfacetexcoord
-  dst.scale[:] = src.scale
-  dst.refpos[:] = src.refpos
-  dst.refquat[:] = src.refquat
-  dst.smoothnormal = src.smoothnormal
-
-
-def copy_texture_data(src: mujoco.MjsTexture, dst: mujoco.MjsTexture) -> None:
-  """Copy texture data from *src* to *dst*.
-
-  Copies the file path or builtin/data fields, format, dimensions, and color
-  settings. The ``name`` field is NOT copied; set it on *dst* before calling.
-  """
-  assert dst.name, "dst.name must be set before copy_texture_data."
-  dst.type = src.type
-  dst.colorspace = src.colorspace
-  dst.builtin = src.builtin
-  dst.mark = src.mark
-  dst.rgb1[:] = src.rgb1
-  dst.rgb2[:] = src.rgb2
-  dst.markrgb[:] = src.markrgb
-  dst.random = src.random
-  dst.gridsize[:] = src.gridsize
-  dst.gridlayout = src.gridlayout
-  dst.width = src.width
-  dst.height = src.height
-  dst.nchannel = src.nchannel
-  dst.hflip = src.hflip
-  dst.vflip = src.vflip
-  if src.file:
-    dst.file = src.file
-  if len(src.cubefiles) > 0:
-    dst.cubefiles = src.cubefiles
-  if len(src.data) > 0:
-    dst.data = src.data
-  if src.content_type:
-    dst.content_type = src.content_type
-
-
-def copy_material_data(src: mujoco.MjsMaterial, dst: mujoco.MjsMaterial) -> None:
-  """Copy material data from *src* to *dst*.
-
-  Copies appearance settings (rgba, specular, shininess, ...) and texture
-  bindings. The ``name`` field is NOT copied; set it on *dst* before calling.
-  """
-  assert dst.name, "dst.name must be set before copy_material_data."
-  dst.rgba[:] = src.rgba
-  dst.emission = src.emission
-  dst.specular = src.specular
-  dst.shininess = src.shininess
-  dst.reflectance = src.reflectance
-  dst.roughness = src.roughness
-  dst.metallic = src.metallic
-  dst.texuniform = src.texuniform
-  dst.texrepeat[:] = src.texrepeat
-  dst.textures = list(src.textures)

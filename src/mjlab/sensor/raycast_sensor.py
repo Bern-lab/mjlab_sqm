@@ -435,7 +435,7 @@ class RayCastSensor(Sensor[RayCastData]):
     self._model: mjwarp.Model | None = None
     self._mj_model: mujoco.MjModel | None = None
     self._device: str | None = None
-    self._wp_device: wp.Device | None = None
+    self._wp_device: wp.context.Device | None = None
 
     # Per-frame info: list of (frame_type, obj_id, body_id).
     self._frame_infos: list[tuple[Literal["body", "site", "geom"], int, int]] = []
@@ -748,23 +748,17 @@ class RayCastSensor(Sensor[RayCastData]):
 
   def raycast_kernel(self, rc: mjwarp.RenderContext) -> None:
     """IN-GRAPH: Execute BVH-accelerated raycast kernel."""
-    assert self._ray_pnt is not None
-    assert self._ray_vec is not None
-    assert self._ray_bodyexclude is not None
-    assert self._ray_dist is not None
-    assert self._ray_geomid is not None
-    assert self._ray_normal is not None
     rays(
       m=self._model.struct,  # type: ignore[attr-defined]
       d=self._data.struct,  # type: ignore[attr-defined]
-      pnt=self._ray_pnt,  # pyright: ignore[reportArgumentType]
-      vec=self._ray_vec,  # pyright: ignore[reportArgumentType]
+      pnt=self._ray_pnt,
+      vec=self._ray_vec,
       geomgroup=self._geomgroup,  # pyright: ignore[reportArgumentType]
       flg_static=True,
       bodyexclude=self._ray_bodyexclude,
-      dist=self._ray_dist,  # pyright: ignore[reportArgumentType]
-      geomid=self._ray_geomid,  # pyright: ignore[reportArgumentType]
-      normal=self._ray_normal,  # pyright: ignore[reportArgumentType]
+      dist=self._ray_dist,
+      geomid=self._ray_geomid,
+      normal=self._ray_normal,
       rc=rc,
     )
 
@@ -781,18 +775,17 @@ class RayCastSensor(Sensor[RayCastData]):
     assert self._ray_dist is not None and self._ray_normal is not None
     distances = wp.to_torch(self._ray_dist)
     normals_w = wp.to_torch(self._ray_normal).view(B, self._num_rays, 3)
-    distances.masked_fill_(distances > self.cfg.max_distance, -1.0)
+    distances[distances > self.cfg.max_distance] = -1.0
 
     hit_mask = distances >= 0
-    # ``origin + ray * max(distance, 0)`` collapses miss rays to ``origin``
-    # (clamped distance is 0) without any branching.
-    clamped = distances.clamp(min=0.0)
-    self._hit_pos_w = (
-      self._cached_world_origins + self._cached_world_rays * clamped.unsqueeze(-1)
-    )
+    hit_pos_w = self._cached_world_origins.clone()
+    hit_pos_w[hit_mask] = self._cached_world_origins[
+      hit_mask
+    ] + self._cached_world_rays[hit_mask] * distances[hit_mask].unsqueeze(-1)
+    self._hit_pos_w = hit_pos_w
 
     # Zero out normals for misses.
-    normals_w.masked_fill_(~hit_mask.unsqueeze(-1), 0.0)
+    normals_w[~hit_mask] = 0.0
     self._distances = distances
     self._normals_w = normals_w
 

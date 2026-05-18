@@ -11,6 +11,7 @@ from mjlab.utils.actuator import (
   ElectricActuator,
   reflected_inertia_from_two_stage_planetary,
 )
+from mjlab.utils.os import update_assets
 from mjlab.utils.spec_config import CollisionCfg
 
 ##
@@ -23,8 +24,16 @@ G1_XML: Path = (
 assert G1_XML.exists()
 
 
+def get_assets(meshdir: str) -> dict[str, bytes]:
+  assets: dict[str, bytes] = {}
+  update_assets(assets, G1_XML.parent / "assets", meshdir)
+  return assets
+
+
 def get_spec() -> mujoco.MjSpec:
-  return mujoco.MjSpec.from_file(str(G1_XML))
+  spec = mujoco.MjSpec.from_file(str(G1_XML))
+  spec.assets = get_assets(spec.meshdir)
+  return spec
 
 
 ##
@@ -268,7 +277,7 @@ def get_g1_robot_cfg() -> EntityCfg:
   the config is shared across multiple places.
   """
   return EntityCfg(
-    init_state=KNEES_BENT_KEYFRAME,
+    init_state=HOME_KEYFRAME,
     collisions=(FULL_COLLISION,),
     spec_fn=get_spec,
     articulation=G1_ARTICULATION,

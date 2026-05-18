@@ -102,7 +102,6 @@ autodoc_mock_imports = [
   "tensordict",
   "trimesh",
   "toml",
-  "mjviser",
   "mujoco_warp",
   "gymnasium",
   "rsl_rl",

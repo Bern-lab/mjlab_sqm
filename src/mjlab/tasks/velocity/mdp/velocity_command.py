@@ -153,9 +153,9 @@ class UniformVelocityCommand(CommandTerm):
     ranges = self.cfg.ranges
 
     axes = [
-      ("lin_vel_x", ranges.lin_vel_x[1]),
-      ("lin_vel_y", ranges.lin_vel_y[1]),
-      ("ang_vel_z", ranges.ang_vel_z[1]),
+      ("lin_vel_x", max(abs(ranges.lin_vel_x[0]), abs(ranges.lin_vel_x[1]))),
+      ("lin_vel_y", max(abs(ranges.lin_vel_y[0]), abs(ranges.lin_vel_y[1]))),
+      ("ang_vel_z", max(abs(ranges.ang_vel_z[0]), abs(ranges.ang_vel_z[1]))),
     ]
     sliders: list = []
 
@@ -167,7 +167,7 @@ class UniformVelocityCommand(CommandTerm):
           f"Max {label}",
           initial_value=max_val,
           step=0.1,
-          min=0.1,
+          min=0.0,
           max=10.0,
         )
         slider = server.gui.add_slider(

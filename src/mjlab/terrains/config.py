@@ -285,17 +285,56 @@ ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
   num_rows=10,
   num_cols=20,
   sub_terrains={
-    "flat": flat(proportion=0.2),
-    "pyramid_stairs": pyramid_stairs(proportion=0.2, step_height_range=(0.0, 0.1)),
+    "flat": flat(proportion=0.0),
+    "pyramid_stairs": pyramid_stairs(proportion=0.4, step_height_range=(0.0, 0.2)),
     "pyramid_stairs_inv": pyramid_stairs_inv(
-      proportion=0.2, step_height_range=(0.0, 0.1)
+      proportion=0.2, step_height_range=(0.0, 0.2)
     ),
-    "hf_pyramid_slope": hf_pyramid_slope(proportion=0.1, slope_range=(0.0, 1.0)),
+    "hf_pyramid_slope": hf_pyramid_slope(proportion=0.2, slope_range=(0.0, 0.5)),
     "hf_pyramid_slope_inv": hf_pyramid_slope_inv(
-      proportion=0.1, slope_range=(0.0, 1.0)
+      proportion=0.1, slope_range=(0.0, 0.5)
     ),
     "random_rough": random_rough(proportion=0.1),
-    "wave_terrain": wave_terrain(proportion=0.1),
+    "wave_terrain": wave_terrain(proportion=0.0),
+  },
+  add_lights=True,
+)
+
+
+BLIND_HIGH_STAIRS_TERRAINS_CFG = TerrainGeneratorCfg(
+  size=(8.0, 8.0),
+  border_width=20.0,
+  num_rows=10,
+  num_cols=5,
+  curriculum=True,
+  sub_terrains={
+    "flat": flat(proportion=0.00),
+    "high_stairs": pyramid_stairs(
+      proportion=0.45,
+      step_height_range=(0.04, 0.2),
+      step_width=0.30,
+      platform_width=3.0,
+      border_width=1.0,
+    ),
+    "high_stairs_inv": pyramid_stairs_inv(
+      proportion=0.35,
+      step_height_range=(0.04, 0.2),
+      step_width=0.30,
+      platform_width=3.0,
+      border_width=1.0,
+    ),
+    "gentle_slope": hf_pyramid_slope(
+      proportion=0.10,
+      slope_range=(0.0, 0.25),
+      platform_width=2.5,
+      border_width=0.5,
+    ),
+    "low_rough": random_rough(
+      proportion=0.10,
+      noise_range=(0.005, 0.04),
+      noise_step=0.01,
+      border_width=0.5,
+    ),
   },
   add_lights=True,
 )

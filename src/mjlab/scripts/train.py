@@ -3,6 +3,7 @@
 import logging
 import os
 import sys
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -12,11 +13,16 @@ import tyro
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.rl import MjlabOnPolicyRunner, RslRlBaseRunnerCfg, RslRlVecEnvWrapper
-from mjlab.scripts._cli import maybe_print_top_level_help
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 from mjlab.utils.gpu import select_gpus
-from mjlab.utils.os import dump_yaml, get_checkpoint_path, get_wandb_checkpoint_path
+from mjlab.utils.os import (
+  dump_yaml,
+  get_checkpoint_path,
+  get_checkpoint_path_with_fallback,
+  get_task_log_root,
+  get_wandb_checkpoint_path,
+)
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wandb import add_wandb_tags
 from mjlab.utils.wrappers import VideoRecorder
@@ -31,8 +37,8 @@ class TrainConfig:
   video_length: int = 200
   video_interval: int = 2000
   enable_nan_guard: bool = False
-  log_root: str = "logs/rsl_rl"
-  """Root directory under which experiment logs are written."""
+  resume_new_run: bool = False
+  """When resuming, load the checkpoint but write logs to a fresh run directory."""
   torchrunx_log_dir: str | None = None
   wandb_run_path: str | None = None
   wandb_checkpoint_name: str | None = None
@@ -59,7 +65,7 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
     os.environ["MUJOCO_EGL_DEVICE_ID"] = str(local_rank)
     device = f"cuda:{local_rank}"
     # Set seed to have diversity in different processes.
-    seed = cfg.agent.seed + rank
+    seed = cfg.agent.seed + local_rank
 
   configure_torch_backends()
 
@@ -106,7 +112,6 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
 
   if rank == 0:
     print(f"[INFO] Logging experiment in directory: {log_dir}")
-
   env = ManagerBasedRlEnv(
     cfg=cfg.env, device=device, render_mode="rgb_array" if cfg.video else None
   )
@@ -130,8 +135,10 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
         )
     else:
       # Load checkpoint from local filesystem.
-      resume_path = get_checkpoint_path(
-        log_root_path, cfg.agent.load_run, cfg.agent.load_checkpoint
+      resume_path = get_checkpoint_path_with_fallback(
+        [log_root_path, Path("logs") / "rsl_rl" / cfg.agent.experiment_name],
+        cfg.agent.load_run,
+        cfg.agent.load_checkpoint,
       )
 
   # Only record videos on rank 0 to avoid multiple workers writing to the same files.
@@ -183,11 +190,73 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
   args = args or TrainConfig.from_task(task_id)
 
   # Create log directory once before launching workers.
-  log_root_path = (Path(args.log_root) / args.agent.experiment_name).resolve()
-  log_dir_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-  if args.agent.run_name:
-    log_dir_name += f"_{args.agent.run_name}"
-  log_dir = log_root_path / log_dir_name
+  log_root_path = get_task_log_root(args.agent.experiment_name, task_id)
+  legacy_log_root_path = Path("logs") / "rsl_rl" / args.agent.experiment_name
+  log_root_path.resolve()
+
+  # If resuming and a specific run is requested, reuse that run directory
+  # so training continues in-place instead of creating a new run.
+  log_dir: Path | None = None
+  if args.agent.resume and not args.resume_new_run:
+    # If user specified a run regex, try to match an existing run directory.
+    if args.agent.load_run and args.agent.load_run != ".*":
+      if not log_root_path.exists():
+        raise ValueError(f"Log root path does not exist: {log_root_path}")
+      matching = [d for d in log_root_path.iterdir() if d.is_dir() and re.match(args.agent.load_run, d.name)]
+      if matching:
+        matching.sort()
+        chosen = matching[-1]
+        print(f"[INFO] Resuming into existing run directory: {chosen}")
+        log_dir = chosen
+      else:
+        # Fall back to creating a new run if no matching run found.
+        print(f"[WARN] No matching run found for '{args.agent.load_run}' under {log_root_path}; creating a new run.")
+        log_dir = None  # signal to create normally
+    else:
+      # No explicit run regex provided: try to locate a checkpoint and resume in-place
+      try:
+        resume_ckpt = get_checkpoint_path_with_fallback(
+          [log_root_path, legacy_log_root_path],
+          args.agent.load_run or ".*",
+          args.agent.load_checkpoint or ".*",
+        )
+        log_dir = resume_ckpt.parent
+        print(f"[INFO] Resuming into run directory from checkpoint: {log_dir}")
+      except Exception as e:
+        # If no checkpoint found, we'll create a new run as before.
+        print(f"[WARN] Could not find checkpoint to resume: {e}; will create a new run.")
+        log_dir = None
+  else:
+    log_dir = None
+
+  if log_dir is None:
+    # If this is a tracking task and a motion file is provided, name runs
+    # using the motion file stem like "55-Exp-1", "55-Exp-2", ...
+    log_dir_name: str | None = None
+    motion_name: str | None = None
+    try:
+      if "motion" in args.env.commands and getattr(args.env.commands["motion"], "motion_file", None):
+        motion_path = Path(args.env.commands["motion"].motion_file)
+        motion_name = motion_path.stem
+    except Exception:
+      motion_name = None
+
+    if motion_name:
+      log_root_path.mkdir(parents=True, exist_ok=True)
+      existing = [d.name for d in log_root_path.iterdir() if d.is_dir() and d.name.startswith(f"{motion_name}-Exp-")]
+      nums: list[int] = []
+      for name in existing:
+        m = re.match(rf"^{re.escape(motion_name)}-Exp-(\d+)$", name)
+        if m:
+          nums.append(int(m.group(1)))
+      next_idx = max(nums) + 1 if nums else 1
+      log_dir_name = f"{motion_name}-Exp-{next_idx}"
+    else:
+      log_dir_name = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+      if args.agent.run_name:
+        log_dir_name += f"_{args.agent.run_name}"
+
+    log_dir = log_root_path / log_dir_name
 
   # Select GPUs based on CUDA_VISIBLE_DEVICES and user specification.
   selected_gpus, num_gpus = select_gpus(args.gpu_ids)
@@ -229,8 +298,6 @@ def launch_training(task_id: str, args: TrainConfig | None = None):
 
 
 def main():
-  maybe_print_top_level_help("train")
-
   # Parse first argument to choose the task.
   # Import tasks to populate the registry.
   import mjlab.tasks  # noqa: F401

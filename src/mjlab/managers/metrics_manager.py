@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import torch
 from prettytable import PrettyTable
@@ -24,14 +24,9 @@ class MetricsTermCfg(ManagerTermBaseCfg):
     decimation loop and report the per-step mean. Only the integrated state
     (qpos, qvel, act) is current mid-loop; all derived quantities (xpos, xquat,
     site_xpos, actuator_force, contacts, ...) are stale.
-    reduce: How to aggregate per-step values into an episode metric.
-    ``"mean"`` (default) reports ``sum / step_count``. ``"last"`` reports
-    the value from the final step of the episode, which is useful for binary
-    success metrics that should not be averaged over timesteps.
   """
 
   per_substep: bool = False
-  reduce: Literal["mean", "last"] = "mean"
 
 
 class MetricsManager(ManagerBase):
@@ -104,13 +99,9 @@ class MetricsManager(ManagerBase):
     counts = self._step_count[env_ids].float()
     # Avoid division by zero for envs that haven't stepped.
     safe_counts = torch.clamp(counts, min=1.0)
-    for idx, key in enumerate(self._episode_sums):
-      if self._term_cfgs[idx].reduce == "last":
-        extras["Episode_Metrics/" + key] = torch.mean(self._step_values[env_ids, idx])
-      else:
-        extras["Episode_Metrics/" + key] = torch.mean(
-          self._episode_sums[key][env_ids] / safe_counts
-        )
+    for key in self._episode_sums:
+      episode_avg = torch.mean(self._episode_sums[key][env_ids] / safe_counts)
+      extras["Episode_Metrics/" + key] = episode_avg
       self._episode_sums[key][env_ids] = 0.0
     self._step_count[env_ids] = 0
     for buf in self._substep_accum:
@@ -127,7 +118,7 @@ class MetricsManager(ManagerBase):
     if not self._substep_term_indices:
       return
     for i, idx in enumerate(self._substep_term_indices):
-      value = self._compute_term(idx)
+      value = self._term_cfgs[idx].func(self._env, **self._term_cfgs[idx].params)
       self._substep_accum[i] += value
     self._substep_count += 1
 
@@ -142,7 +133,8 @@ class MetricsManager(ManagerBase):
       self._substep_count = 0
     for idx in self._step_term_indices:
       name = self._term_names[idx]
-      value = self._compute_term(idx)
+      term_cfg = self._term_cfgs[idx]
+      value = term_cfg.func(self._env, **term_cfg.params)
       self._episode_sums[name] += value
       self._step_values[:, idx] = value
 
@@ -170,13 +162,6 @@ class MetricsManager(ManagerBase):
         self._step_term_indices.append(idx)
       if hasattr(term_cfg.func, "reset") and callable(term_cfg.func.reset):
         self._class_term_cfgs.append(term_cfg)
-
-  def _compute_term(self, idx: int) -> torch.Tensor:
-    name = self._term_names[idx]
-    term_cfg = self._term_cfgs[idx]
-    value = term_cfg.func(self._env, **term_cfg.params)
-    self._check_term_shape(name, value)
-    return value
 
 
 class NullMetricsManager:

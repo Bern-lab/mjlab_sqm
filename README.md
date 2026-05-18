@@ -7,7 +7,6 @@
 [![License](https://img.shields.io/github/license/mujocolab/mjlab)](https://github.com/mujocolab/mjlab/blob/main/LICENSE)
 [![Nightly Benchmarks](https://img.shields.io/badge/Nightly-Benchmarks-blue)](https://mujocolab.github.io/mjlab/nightly/)
 [![PyPI](https://img.shields.io/pypi/v/mjlab)](https://pypi.org/project/mjlab/)
-[![PyPI downloads](https://img.shields.io/pypi/dm/mjlab?color=blue)](https://pypistats.org/packages/mjlab)
 
 mjlab combines [Isaac Lab](https://github.com/isaac-sim/IsaacLab)'s manager-based API with [MuJoCo Warp](https://github.com/google-deepmind/mujoco_warp), a GPU-accelerated version of [MuJoCo](https://github.com/google-deepmind/mujoco).
 The framework provides composable building blocks for environment design,
@@ -71,7 +70,21 @@ uv run train Mjlab-Tracking-Flat-Unitree-G1 --registry-name your-org/motions/mot
 uv run play Mjlab-Tracking-Flat-Unitree-G1 --wandb-run-path your-org/mjlab/run-id
 ```
 
-### 3. Sanity-check with Dummy Agents
+### 3. Teacher-KL Velocity Training
+
+This branch adds a Teacher-KL training task for Unitree G1 blind-rough
+locomotion. A blind student actor is trained with PPO while a frozen privileged
+teacher provides the KL regularizer; the baseline blind-rough PPO task remains
+separate.
+
+```bash
+uv run train Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 --env.scene.num-envs 4096
+```
+
+See [rsl](third_party/rsl_rl) for downloads. The transformer version is planned for
+public release next month.
+
+### 4. Sanity-check with Dummy Agents
 
 Use built-in agents to sanity check your MDP before training:
 

@@ -5,6 +5,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+import mujoco
 import numpy as np
 import torch
 
@@ -119,7 +120,8 @@ class MotionCommand(CommandTerm):
     self.metrics["sampling_top1_prob"] = torch.zeros(self.num_envs, device=self.device)
     self.metrics["sampling_top1_bin"] = torch.zeros(self.num_envs, device=self.device)
 
-    self._ghost_model = None
+    # Ghost model created lazily on first visualization
+    self._ghost_model: mujoco.MjModel | None = None
     self._ghost_color = np.array(cfg.viz.ghost_color, dtype=np.float32)
 
   @property
@@ -427,17 +429,8 @@ class MotionCommand(CommandTerm):
 
     if self.cfg.viz.mode == "ghost":
       if self._ghost_model is None:
-        # Build a ghost model with only visual geoms visible. Collision geoms (nonzero
-        # contype/conaffinity) get alpha=0 so the viewer's alpha filter excludes them.
         self._ghost_model = copy.deepcopy(self._env.sim.mj_model)
-        for gi in range(self._ghost_model.ngeom):
-          if (
-            self._ghost_model.geom_contype[gi] != 0
-            or self._ghost_model.geom_conaffinity[gi] != 0
-          ):
-            self._ghost_model.geom_rgba[gi, 3] = 0
-          else:
-            self._ghost_model.geom_rgba[gi] = self._ghost_color
+        self._ghost_model.geom_rgba[:] = self._ghost_color
 
       entity: Entity = self._env.scene[self.cfg.entity_name]
       indexing = entity.indexing
@@ -450,11 +443,7 @@ class MotionCommand(CommandTerm):
         qpos[free_joint_q_adr[3:7]] = self.body_quat_w[batch, 0].cpu().numpy()
         qpos[joint_q_adr] = self.joint_pos[batch].cpu().numpy()
 
-        visualizer.add_ghost_mesh(
-          qpos,
-          model=self._ghost_model,
-          label=f"ghost_{batch}",
-        )
+        visualizer.add_ghost_mesh(qpos, model=self._ghost_model, label=f"ghost_{batch}")
 
     elif self.cfg.viz.mode == "frames":
       for batch in env_indices:

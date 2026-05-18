@@ -1,8 +1,37 @@
 import re
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict
 
 import yaml
+
+
+def update_assets(
+  assets: Dict[str, Any],
+  path: str | Path,
+  meshdir: str | None = None,
+  glob: str = "*",
+  recursive: bool = False,
+):
+  """Update assets dictionary with files from a directory.
+
+  This function reads files from a directory and adds them to an assets dictionary,
+  with keys formatted to include the meshdir prefix when specified.
+
+  Args:
+    assets: Dictionary to update with file contents. Keys are asset paths, values are
+      file contents as bytes.
+    path: Path to directory containing asset files.
+    meshdir: Optional mesh directory prefix, typically `spec.meshdir`. If provided,
+      will be prepended to asset keys (e.g., "mesh.obj" becomes "custom_dir/mesh.obj").
+    glob: Glob pattern for file matching. Defaults to "*" (all files).
+    recursive: If True, recursively search subdirectories.
+  """
+  for f in Path(path).glob(glob):
+    if f.is_file():
+      asset_key = f"{meshdir}/{f.name}" if meshdir else f.name
+      assets[asset_key] = f.read_bytes()
+    elif f.is_dir() and recursive:
+      update_assets(assets, f, meshdir, glob, recursive)
 
 
 def dump_yaml(filename: Path, data: Dict, sort_keys: bool = False) -> None:
@@ -18,6 +47,15 @@ def dump_yaml(filename: Path, data: Dict, sort_keys: bool = False) -> None:
   filename.parent.mkdir(parents=True, exist_ok=True)
   with open(filename, "w") as f:
     yaml.dump(data, f, sort_keys=sort_keys)
+
+
+def get_task_log_root(experiment_name: str, task_id: str) -> Path:
+  """Return the default log root for a specific task.
+
+  Logs are grouped by experiment first, then task, e.g.
+  ``logs/rsl_rl/g1_velocity/Mjlab-Velocity-Blind-Rough-Unitree-G1``.
+  """
+  return Path("logs") / "rsl_rl" / experiment_name / task_id
 
 
 def get_checkpoint_path(
@@ -60,6 +98,23 @@ def get_checkpoint_path(
   return run_path / checkpoint_file
 
 
+def get_checkpoint_path_with_fallback(
+  log_paths: list[Path],
+  run_dir: str = ".*",
+  checkpoint: str = ".*",
+  sort_alpha: bool = True,
+) -> Path:
+  """Resolve a checkpoint by searching multiple log roots in order."""
+  errors: list[str] = []
+  for log_path in log_paths:
+    try:
+      return get_checkpoint_path(log_path, run_dir, checkpoint, sort_alpha=sort_alpha)
+    except Exception as exc:
+      errors.append(f"{log_path}: {exc}")
+  joined = "\n".join(errors)
+  raise ValueError(f"Could not find checkpoint in any candidate log root:\n{joined}")
+
+
 def get_wandb_checkpoint_path(
   log_path: Path, run_path: Path, checkpoint_name: str | None = None
 ) -> tuple[Path, bool]:
@@ -78,9 +133,7 @@ def get_wandb_checkpoint_path(
   api = wandb.Api()
   wandb_run = api.run(str(run_path))
   files = [
-    file.name
-    for file in wandb_run.files(pattern="model_%.pt")
-    if re.match(r"^model_\d+\.pt$", file.name)
+    file.name for file in wandb_run.files() if re.match(r"^model_\d+\.pt$", file.name)
   ]
   if checkpoint_name is None:
     checkpoint_file = max(files, key=lambda x: int(x.split("_")[1].split(".")[0]))

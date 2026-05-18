@@ -75,7 +75,7 @@ class TerrainEntityCfg(EntityCfg):
   env_spacing: float | None = 2.0
   """Distance between environment origins when using grid layout. Required for
   "plane" terrain or when no sub-terrain origins exist."""
-  max_init_terrain_level: int | None = None
+  max_init_terrain_level: int | None = None#机器人开始出生在哪个难度等级
   """Maximum initial difficulty level (row index) for environment placement in
   curriculum mode. None uses all available rows."""
   num_envs: int = 1
@@ -95,9 +95,6 @@ class TerrainEntityCfg(EntityCfg):
     default_factory=lambda: (_DEFAULT_SUN_LIGHT,)
   )
   """Lights for the scene. Defaults to a directional sun light."""
-  debug_vis: bool = False
-  """Add visualization sites for environment origins, terrain origins, and
-  flat patches. Defaults to False."""
 
   def build(self) -> TerrainEntity:
     raise TypeError(
@@ -161,10 +158,9 @@ class TerrainEntity(Entity):
     else:
       raise ValueError(f"Unknown terrain type: {self.cfg.terrain_type}")
 
-    if self.cfg.debug_vis:
-      self._add_env_origin_sites()
-      self._add_terrain_origin_sites()
-      self._add_flat_patch_sites()
+    self._add_env_origin_sites()
+    self._add_terrain_origin_sites()
+    self._add_flat_patch_sites()
 
   def _add_initial_state_keyframe(self) -> None:
     pass  # No joints, no keyframe.

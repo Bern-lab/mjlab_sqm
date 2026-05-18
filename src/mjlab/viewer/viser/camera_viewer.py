@@ -14,20 +14,23 @@ if TYPE_CHECKING:
 
 
 def _colorize_segmentation(seg: np.ndarray) -> np.ndarray:
-  """Map typed segmentation pairs to distinct RGB colors."""
-  h, w, _ = seg.shape
+  """Map geom IDs to distinct RGB colors. Background (-1) is black."""
+  h, w = seg.shape
   rgb = np.zeros((h, w, 3), dtype=np.uint8)
-  obj_ids = seg[..., 0]
-  obj_types = seg[..., 1]
-  mask = (obj_ids >= 0) & (obj_types >= 0)
+  mask = seg >= 0
   if mask.any():
-    ids = obj_ids[mask].astype(np.uint32)
-    types = obj_types[mask].astype(np.uint32)
-    keys = ids * np.uint32(1315423911) ^ types * np.uint32(2654435761)
-    rgb[mask, 0] = ((keys * 67 + 29) % 255 + 1).astype(np.uint8)
-    rgb[mask, 1] = ((keys * 131 + 53) % 255 + 1).astype(np.uint8)
-    rgb[mask, 2] = ((keys * 199 + 97) % 255 + 1).astype(np.uint8)
+    ids = seg[mask].astype(np.uint32)
+    rgb[mask, 0] = ((ids * 67 + 29) % 255 + 1).astype(np.uint8)
+    rgb[mask, 1] = ((ids * 131 + 53) % 255 + 1).astype(np.uint8)
+    rgb[mask, 2] = ((ids * 199 + 97) % 255 + 1).astype(np.uint8)
   return rgb
+
+
+_GROUND_FOOTPRINT_COLOR = (24, 150, 55)
+_GROUND_FOOTPRINT_OPACITY = 0.52
+_GROUND_FOOTPRINT_Z_OFFSET = 0.015
+_GROUND_FOOTPRINT_MAX_EDGE_LENGTH = 0.35
+_GROUND_PROJECTION_POINT_SIZE = 0.055
 
 
 class ViserCameraViewer:
@@ -48,6 +51,9 @@ class ViserCameraViewer:
     self._depth_handle: viser.GuiImageHandle | None = None
     self._seg_handle: viser.GuiImageHandle | None = None
     self._frustum_handle: viser.CameraFrustumHandle | None = None
+    self._ground_footprint_handle: viser.MeshHandle | None = None
+    self._ground_projection_handle: viser.PointCloudHandle | None = None
+    self._pixel_dirs_cache: dict[tuple[int, int], np.ndarray] = {}
 
     self._camera_name = camera_sensor.camera_name
     self._camera_idx = camera_sensor.camera_idx
@@ -99,6 +105,17 @@ class ViserCameraViewer:
       label="Frustum",
       initial_value=True,
     )
+    self._show_ground_footprint_toggle = self._server.gui.add_checkbox(
+      label="Ground Footprint",
+      initial_value=self._has_depth,
+    )
+    self._footprint_range_slider = self._server.gui.add_slider(
+      label="Footprint Range",
+      min=0.5,
+      max=10.0,
+      step=0.1,
+      initial_value=3.0,
+    )
     self._fov, self._aspect = self._compute_camera_fov_aspect()
 
   def _compute_camera_fov_aspect(self) -> tuple[float, float]:
@@ -142,6 +159,163 @@ class ViserCameraViewer:
       self._frustum_handle.position = cam_pos
       self._frustum_handle.wxyz = wxyz
 
+  def _camera_pixel_dirs(self, height: int, width: int) -> np.ndarray:
+    """Return normalized MuJoCo-camera-frame rays for every image pixel."""
+    cache_key = (height, width)
+    if cache_key in self._pixel_dirs_cache:
+      return self._pixel_dirs_cache[cache_key]
+
+    half_v = self._fov * 0.5
+    tan_v = np.tan(half_v)
+    tan_h = tan_v * self._aspect
+
+    u = np.linspace(-1.0, 1.0, width, dtype=np.float64)
+    v = np.linspace(-1.0, 1.0, height, dtype=np.float64)
+    grid_u, grid_v = np.meshgrid(u, v, indexing="xy")
+    dirs = np.stack(
+      [
+        grid_u.reshape(-1) * tan_h,
+        grid_v.reshape(-1) * tan_v,
+        -np.ones(height * width, dtype=np.float64),
+      ],
+      axis=1,
+    )
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    self._pixel_dirs_cache[cache_key] = dirs
+    return dirs
+
+  def _depth_projection_geometry(
+    self,
+    depth: np.ndarray,
+    cam_pos: np.ndarray,
+    cam_mat: np.ndarray,
+    render_z: float,
+    max_range: float,
+  ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project current depth pixels vertically onto the ground plane."""
+    height, width = depth.shape
+    depth_flat = depth.reshape(-1).astype(np.float64)
+    local_dirs = self._camera_pixel_dirs(height, width)
+    valid = np.isfinite(depth_flat) & (depth_flat > 1.0e-4) & (depth_flat <= max_range)
+
+    ray_scale = depth_flat / np.maximum(-local_dirs[:, 2], 1.0e-6)
+    local_points = local_dirs * ray_scale[:, None]
+    projected = (cam_mat @ local_points.T).T + cam_pos
+    projected[:, 2] = render_z
+    projected = projected.astype(np.float32)
+
+    valid_grid = valid.reshape(height, width)
+    faces: list[tuple[int, int, int]] = []
+    for y in range(height - 1):
+      for x in range(width - 1):
+        idx00 = y * width + x
+        idx10 = idx00 + 1
+        idx01 = idx00 + width
+        idx11 = idx01 + 1
+        if not (
+          valid_grid[y, x]
+          and valid_grid[y, x + 1]
+          and valid_grid[y + 1, x]
+          and valid_grid[y + 1, x + 1]
+        ):
+          continue
+
+        quad = projected[[idx00, idx10, idx11, idx01]]
+        edge_lengths = np.linalg.norm(quad - np.roll(quad, -1, axis=0), axis=1)
+        if np.max(edge_lengths) > _GROUND_FOOTPRINT_MAX_EDGE_LENGTH:
+          continue
+
+        faces.append((idx00, idx10, idx11))
+        faces.append((idx00, idx11, idx01))
+
+    return (
+      projected,
+      np.array(faces, dtype=np.uint32),
+      projected[valid],
+    )
+
+  def _update_ground_footprint(
+    self,
+    sim_data,
+    env_idx: int,
+    scene_offset: np.ndarray,
+  ) -> None:
+    if not self._show_ground_footprint_toggle.value:
+      if self._ground_footprint_handle is not None:
+        self._ground_footprint_handle.remove()
+        self._ground_footprint_handle = None
+      if self._ground_projection_handle is not None:
+        self._ground_projection_handle.remove()
+        self._ground_projection_handle = None
+      return
+
+    data = self._camera_sensor.data
+    if data.depth is None:
+      return
+
+    cam_id = self._camera_idx
+    cam_pos = sim_data.cam_xpos[env_idx, cam_id].cpu().numpy() + scene_offset
+    cam_mat = sim_data.cam_xmat[env_idx, cam_id].cpu().numpy().reshape(3, 3)
+    ground_z = float(scene_offset[2])
+    render_z = ground_z + _GROUND_FOOTPRINT_Z_OFFSET
+    max_range = max(float(self._footprint_range_slider.value), 0.1)
+
+    depth = data.depth[env_idx, :, :, 0].cpu().numpy()
+    vertices, faces, projected_points = self._depth_projection_geometry(
+      depth=depth,
+      cam_pos=cam_pos,
+      cam_mat=cam_mat,
+      render_z=render_z,
+      max_range=max_range,
+    )
+    if faces.size == 0 or projected_points.size == 0:
+      if self._ground_footprint_handle is not None:
+        self._ground_footprint_handle.visible = False
+      if self._ground_projection_handle is not None:
+        self._ground_projection_handle.visible = False
+      return
+
+    if self._ground_footprint_handle is None:
+      self._ground_footprint_handle = self._server.scene.add_mesh_simple(
+        name=f"/{self._camera_name}_ground_footprint",
+        vertices=vertices,
+        faces=faces,
+        color=_GROUND_FOOTPRINT_COLOR,
+        opacity=_GROUND_FOOTPRINT_OPACITY,
+        side="double",
+        cast_shadow=False,
+        receive_shadow=False,
+      )
+    else:
+      try:
+        self._ground_footprint_handle.vertices = vertices
+        self._ground_footprint_handle.faces = faces
+        self._ground_footprint_handle.visible = True
+      except Exception:
+        self._ground_footprint_handle.remove()
+        self._ground_footprint_handle = None
+
+    projection_colors = np.full(
+      (projected_points.shape[0], 3), _GROUND_FOOTPRINT_COLOR, dtype=np.uint8
+    )
+    if self._ground_projection_handle is None:
+      self._ground_projection_handle = self._server.scene.add_point_cloud(
+        name=f"/{self._camera_name}_ground_projection_pixels",
+        points=projected_points.astype(np.float32),
+        colors=projection_colors,
+        point_size=_GROUND_PROJECTION_POINT_SIZE,
+        point_shape="square",
+        precision="float32",
+      )
+    else:
+      try:
+        self._ground_projection_handle.points = projected_points.astype(np.float32)
+        self._ground_projection_handle.colors = projection_colors
+        self._ground_projection_handle.visible = True
+      except Exception:
+        self._ground_projection_handle.remove()
+        self._ground_projection_handle = None
+
   def _upsample_nearest(self, image: np.ndarray, scale: int) -> np.ndarray:
     return np.repeat(np.repeat(image, scale, axis=0), scale, axis=1)
 
@@ -170,13 +344,14 @@ class ViserCameraViewer:
       )
 
     if self._has_seg and self._seg_handle is not None and data.segmentation is not None:
-      seg_np = data.segmentation[env_idx].cpu().numpy()
+      seg_np = data.segmentation[env_idx, :, :, 0].cpu().numpy()
       seg_rgb = _colorize_segmentation(seg_np)
       self._seg_handle.image = self._maybe_upsample(seg_rgb)
 
     if scene_offset is None:
       scene_offset = np.zeros(3)
     self._update_frustum(sim_data, env_idx, scene_offset)
+    self._update_ground_footprint(sim_data, env_idx, scene_offset)
 
   def cleanup(self) -> None:
     if self._rgb_handle is not None:
@@ -188,4 +363,10 @@ class ViserCameraViewer:
       self._seg_handle.remove()
     if self._frustum_handle is not None:
       self._frustum_handle.remove()
+    if self._ground_footprint_handle is not None:
+      self._ground_footprint_handle.remove()
+    if self._ground_projection_handle is not None:
+      self._ground_projection_handle.remove()
     self._show_frustum_toggle.remove()
+    self._show_ground_footprint_toggle.remove()
+    self._footprint_range_slider.remove()

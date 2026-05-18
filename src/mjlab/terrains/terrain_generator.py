@@ -20,7 +20,7 @@ class FlatPatchSamplingCfg:
 
   num_patches: int = 10
   """Number of flat patches to sample per sub-terrain."""
-  patch_radius: float = 0.5
+  patch_radius: float = 0.3
   """Radius of the circular footprint used to test flatness, in meters."""
   max_height_diff: float = 0.05
   """Maximum allowed height variation within the patch footprint, in meters."""
@@ -53,7 +53,7 @@ class TerrainOutput:
   """Spawn origin position (x, y, z) in the sub-terrain's local frame."""
   geometries: list[TerrainGeometry]
   """List of geometry elements comprising this terrain."""
-  flat_patches: dict[str, np.ndarray] | None = None
+  flat_patches: dict[str, np.ndarray] | None = None#关联平坦点，保存找到的点位置，key是点的名字，value是一个(N, 3)的数组，包含N个平坦点的世界坐标。如果某个地形没有生成平坦点，则对应的值为None。
   """Named sets of flat patch positions, each an (N, 3) array. None if not configured."""
 
 

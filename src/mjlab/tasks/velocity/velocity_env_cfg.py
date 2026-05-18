@@ -74,11 +74,6 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
 
   actor_terms = {
-    "base_lin_vel": ObservationTermCfg(
-      func=mdp.builtin_sensor,
-      params={"sensor_name": "robot/imu_lin_vel"},
-      noise=Unoise(n_min=-0.5, n_max=0.5),
-    ),
     "base_ang_vel": ObservationTermCfg(
       func=mdp.builtin_sensor,
       params={"sensor_name": "robot/imu_ang_vel"},
@@ -88,19 +83,23 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.projected_gravity,
       noise=Unoise(n_min=-0.05, n_max=0.05),
     ),
-    "joint_pos": ObservationTermCfg(
-      func=mdp.joint_pos_rel,
-      noise=Unoise(n_min=-0.01, n_max=0.01),
-    ),
-    "joint_vel": ObservationTermCfg(
-      func=mdp.joint_vel_rel,
-      noise=Unoise(n_min=-1.5, n_max=1.5),
-    ),
-    "actions": ObservationTermCfg(func=mdp.last_action),
-    "command": ObservationTermCfg(
+    "velocity_commands": ObservationTermCfg(
       func=mdp.generated_commands,
       params={"command_name": "twist"},
     ),
+    "gait_phase": ObservationTermCfg(
+      func=mdp.phase,
+      params={"period": 0.6, "command_name": "twist"},
+    ),
+    "joint_pos_rel": ObservationTermCfg(
+      func=mdp.joint_pos_rel,
+      noise=Unoise(n_min=-0.01, n_max=0.01),
+    ),
+    "joint_vel_rel": ObservationTermCfg(
+      func=mdp.joint_vel_rel,
+      noise=Unoise(n_min=-1.5, n_max=1.5),
+    ),
+    "last_action": ObservationTermCfg(func=mdp.last_action),
     "height_scan": ObservationTermCfg(
       func=envs_mdp.height_scan,
       params={"sensor_name": "terrain_scan"},
@@ -111,6 +110,11 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
 
   critic_terms = {
     **actor_terms,
+    "base_lin_vel": ObservationTermCfg(
+      func=mdp.builtin_sensor,
+      params={"sensor_name": "robot/imu_lin_vel"},
+      noise=Unoise(n_min=-0.5, n_max=0.5),
+    ),
     "height_scan": ObservationTermCfg(
       func=envs_mdp.height_scan,
       params={"sensor_name": "terrain_scan"},
@@ -315,7 +319,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       params={"sensor_name": "robot/root_angmom"},
     ),
     "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
-    "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
+    "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.15),
     "air_time": RewardTermCfg(
       func=mdp.feet_air_time,
       weight=0.0,  # Override per-robot.
@@ -331,27 +335,28 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.feet_clearance,
       weight=-2.0,
       params={
-        "target_height": 0.1,
+        "min_height": 0.08,
+        "max_height": 0.25,
         "height_sensor_name": "foot_height_scan",
         "command_name": "twist",
         "command_threshold": 0.05,
         "asset_cfg": SceneEntityCfg("robot", site_names=()),  # Set per-robot.
       },
     ),
-    "foot_swing_height": RewardTermCfg(
-      func=mdp.feet_swing_height,
-      weight=-0.25,
-      params={
-        "sensor_name": "feet_ground_contact",
-        "height_sensor_name": "foot_height_scan",
-        "target_height": 0.1,
-        "command_name": "twist",
-        "command_threshold": 0.05,
-      },
-    ),
+    # "foot_swing_height": RewardTermCfg(
+    #   func=mdp.feet_swing_height,
+    #   weight=-0.25,
+    #   params={
+    #     "sensor_name": "feet_ground_contact",
+    #     "height_sensor_name": "foot_height_scan",
+    #     "target_height": 0.15,
+    #     "command_name": "twist",
+    #     "command_threshold": 0.05,
+    #   },
+    # ),
     "foot_slip": RewardTermCfg(
       func=mdp.feet_slip,
-      weight=-0.1,
+      weight=-0.2,
       params={
         "sensor_name": "feet_ground_contact",
         "command_name": "twist",
@@ -361,11 +366,43 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     ),
     "soft_landing": RewardTermCfg(
       func=mdp.soft_landing,
-      weight=-1e-5,
+      weight=-2e-5,
       params={
         "sensor_name": "feet_ground_contact",
         "command_name": "twist",
         "command_threshold": 0.05,
+      },
+    ),
+    "idle_penalty": RewardTermCfg(
+      func=mdp.idle_penalty,
+      weight=-2.0,#-2
+      params={
+        "command_name": "twist",
+        "command_threshold": 0.2,
+        "velocity_threshold": 0.1,
+      },
+    ),
+    "foot_gait": RewardTermCfg(
+      func=mdp.feet_gait,
+      weight=0.5,
+      params={
+        "period": 0.6,
+        "offset": [0.0, 0.5],
+        "threshold": 0.56,
+        "command_threshold": 0.1,
+        "command_name": "twist",
+        "sensor_name": "feet_ground_contact",
+      }
+    ),
+    "base_height_above_support": RewardTermCfg(
+      func=mdp.base_height_above_support,
+      weight=-0.5,
+      params={
+        "height_sensor_name": "foot_height_scan",
+        "contact_sensor_name": "feet_ground_contact",
+        "min_height": 0.74,
+        "error_scale": 10.0,
+        "asset_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
       },
     ),
   }

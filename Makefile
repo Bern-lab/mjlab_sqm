@@ -1,10 +1,6 @@
 .PHONY: sync
 sync:
-	uv sync --all-packages --extra cu128 --group dev
-
-.PHONY: sync-cpu
-sync-cpu:
-	uv sync --all-packages --extra cpu --group dev
+	uv sync --all-extras --all-packages --group dev
 
 .PHONY: format
 format:

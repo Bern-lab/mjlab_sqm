@@ -13,10 +13,9 @@ import tyro
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
-from mjlab.scripts._cli import maybe_print_top_level_help
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
-from mjlab.utils.os import get_wandb_checkpoint_path
+from mjlab.utils.os import get_task_log_root, get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
@@ -49,8 +48,6 @@ class PlayConfig:
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
-  log_root: str = "logs/rsl_rl"
-  """Root directory under which experiment logs are written."""
 
   # Internal flag used by demo script.
   _demo_mode: tyro.conf.Suppress[bool] = False
@@ -132,7 +129,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   log_dir: Path | None = None
   resume_path: Path | None = None
   if TRAINED_MODE:
-    log_root_path = (Path(cfg.log_root) / agent_cfg.experiment_name).resolve()
+    log_root_path = get_task_log_root(agent_cfg.experiment_name, task_id).resolve()
     if cfg.checkpoint_file is not None:
       resume_path = Path(cfg.checkpoint_file)
       if not resume_path.exists():
@@ -167,6 +164,11 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(
       "[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir)."
     )
+
+  # # TODO--- 修正缓冲区溢出问题 ---
+  # env_cfg.nconmax = 512  # 大幅增加碰撞槽位
+  # env_cfg.njmax = 4096  # 大幅增加约束槽位
+
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
   if TRAINED_MODE and cfg.video:
@@ -298,8 +300,6 @@ def run_play(task_id: str, cfg: PlayConfig):
 
 
 def main():
-  maybe_print_top_level_help("play")
-
   # Parse first argument to choose the task.
   # Import tasks to populate the registry.
   import mjlab.tasks  # noqa: F401

@@ -3,6 +3,7 @@ logs/
 onnx/
 videos/
 __pycache__/
+*.egg-info/
 MUJOCO_LOG.TXT
 debug.py
 .vscode/

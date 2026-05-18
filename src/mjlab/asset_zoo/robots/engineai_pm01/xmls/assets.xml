@@ -1,0 +1,32 @@
+<mujoco model = "assets">
+
+    <mesh name="LINK_BASE" file="assets/LINK_BASE.STL"/>
+    <mesh name="LINK_HIP_ROLL_L" file="assets/LINK_HIP_ROLL_L.STL"/>
+    <mesh name="LINK_HIP_YAW_L" file="assets/LINK_HIP_YAW_L.STL"/>
+    <mesh name="LINK_HIP_PITCH_L" file="assets/LINK_HIP_PITCH_L.STL"/>
+    <mesh name="LINK_KNEE_PITCH_L" file="assets/LINK_KNEE_PITCH_L.STL"/>
+    <mesh name="LINK_ANKLE_PITCH_L" file="assets/LINK_ANKLE_PITCH_L.STL"/>
+    <mesh name="LINK_ANKLE_ROLL_L" file="assets/LINK_ANKLE_ROLL_L.STL"/>
+    <mesh name="LINK_HIP_ROLL_R" file="assets/LINK_HIP_ROLL_R.STL"/>
+    <mesh name="LINK_HIP_YAW_R" file="assets/LINK_HIP_YAW_R.STL"/>
+    <mesh name="LINK_HIP_PITCH_R" file="assets/LINK_HIP_PITCH_R.STL"/>
+    <mesh name="LINK_KNEE_PITCH_R" file="assets/LINK_KNEE_PITCH_R.STL"/>
+    <mesh name="LINK_ANKLE_PITCH_R" file="assets/LINK_ANKLE_PITCH_R.STL"/>
+    <mesh name="LINK_ANKLE_ROLL_R" file="assets/LINK_ANKLE_ROLL_R.STL"/>
+
+    <mesh name="LINK_TORSO_YAW" file="assets/LINK_TORSO_YAW.STL"/>
+
+    <mesh name="LINK_SHOULDER_PITCH_L" file="assets/LINK_SHOULDER_PITCH_L.STL"/>
+    <mesh name="LINK_SHOULDER_ROLL_L" file="assets/LINK_SHOULDER_ROLL_L.STL"/>
+    <mesh name="LINK_SHOULDER_YAW_L" file="assets/LINK_SHOULDER_YAW_L.STL"/>
+    <mesh name="LINK_ELBOW_PITCH_L" file="assets/LINK_ELBOW_PITCH_L.STL"/>
+    <mesh name="LINK_ELBOW_YAW_L" file="assets/LINK_ELBOW_YAW_L.STL"/>
+    <mesh name="LINK_SHOULDER_PITCH_R" file="assets/LINK_SHOULDER_PITCH_R.STL"/>
+    <mesh name="LINK_SHOULDER_ROLL_R" file="assets/LINK_SHOULDER_ROLL_R.STL"/>
+    <mesh name="LINK_SHOULDER_YAW_R" file="assets/LINK_SHOULDER_YAW_R.STL"/>
+    <mesh name="LINK_ELBOW_PITCH_R" file="assets/LINK_ELBOW_PITCH_R.STL"/>
+    <mesh name="LINK_ELBOW_YAW_R" file="assets/LINK_ELBOW_YAW_R.STL"/>
+
+    <mesh name="LINK_HEAD_YAW" file="assets/LINK_HEAD_YAW.STL"/>
+
+</mujoco>

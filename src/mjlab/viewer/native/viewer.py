@@ -52,18 +52,13 @@ import mujoco.viewer
 import numpy as np
 import torch
 
+from mjlab.sensor import CameraSensor
 from mjlab.viewer.base import (
   BaseViewer,
   EnvProtocol,
   PolicyProtocol,
   VerbosityLevel,
   ViewerAction,
-)
-from mjlab.viewer.model_sync import (
-  VIEWER_INERTIAL_FIELDS,
-  VIEWER_MODEL_FIELDS,
-  disable_model_sameframe_shortcuts,
-  sync_model_fields,
 )
 from mjlab.viewer.native.visualizer import MujocoNativeDebugVisualizer
 
@@ -94,6 +89,8 @@ class _SimDataProtocol(Protocol):
   qvel: "_TensorArrayProtocol"
   mocap_pos: "_TensorArrayProtocol"
   mocap_quat: "_TensorArrayProtocol"
+  cam_xpos: "_TensorArrayProtocol"
+  cam_xmat: "_TensorArrayProtocol"
   ctrl: "_TensorArrayProtocol"
   xfrc_applied: "_TensorArrayProtocol"
   qfrc_applied: "_TensorArrayProtocol"
@@ -119,6 +116,14 @@ class _SimProtocol(Protocol):
 
 
 class NativeMujocoViewer(BaseViewer):
+  _DEPTH_CAMERA_PROJECTION_COLOR = (0.02, 0.42, 0.10, 0.72)
+  _DEPTH_CAMERA_FRUSTUM_COLOR = (0.25, 0.25, 0.25, 0.45)
+  _DEPTH_CAMERA_MAX_RANGE = 5.0
+  _DEPTH_CAMERA_PROJECTION_STRIDE = 3
+  _DEPTH_CAMERA_POINT_RADIUS = 0.035
+  _DEPTH_CAMERA_GROUND_Z_OFFSET = 0.02
+  _DEPTH_CAMERA_FRUSTUM_LENGTH = 0.75
+
   def __init__(
     self,
     env: EnvProtocol,
@@ -161,7 +166,6 @@ class NativeMujocoViewer(BaseViewer):
     self.mjm = sim.mj_model
     self.mjd = sim.mj_data
     assert self.mjm is not None
-    disable_model_sameframe_shortcuts(self.mjm)
     if self.cfg.fovy is not None:
       self.mjm.vis.global_.fovy = self.cfg.fovy
 
@@ -231,15 +235,14 @@ class NativeMujocoViewer(BaseViewer):
       self._update_reward_figures(v)
 
       self._update_debug_visualizers(v)
-      self._add_env_selection_marker(v)
       self._render_other_env_geoms(v, sim, sim_data)
 
       # Pin tracking camera to body frame origin so DR-induced COM shifts don't move
       # the camera.
-      if sim.expanded_fields & VIEWER_INERTIAL_FIELDS:
+      if sim.expanded_fields & self._INERTIAL_FIELDS:
         self._stabilize_tracking_camera()
 
-      has_visual_dr = bool(sim.expanded_fields & VIEWER_MODEL_FIELDS)
+      has_visual_dr = bool(sim.expanded_fields & self._VISUAL_FIELDS)
       v.sync(state_only=not has_visual_dr)
 
   def _set_status_overlay(self, viewer: mujoco.viewer.Handle) -> None:
@@ -300,37 +303,144 @@ class NativeMujocoViewer(BaseViewer):
         viewer.user_scn, self.mjm, self.env_idx, self._show_all_envs
       )
       self.env.unwrapped.update_visualizers(visualizer)
+      self._update_depth_camera_visualizers(visualizer)
 
-  def _add_env_selection_marker(self, viewer: mujoco.viewer.Handle) -> None:
-    """Draw a downward arrow above the selected environment."""
-    if self.env.unwrapped.num_envs <= 1:
-      return
-    assert self.mjd is not None and self.mjm is not None
-    last = self.mjm.nbody - 1
-    center = self.mjd.xpos[max(last, 1)].copy()
-    arrow_top = center + np.array([0.0, 0.0, 0.4])
-    arrow_bottom = center + np.array([0.0, 0.0, 0.15])
-    scn = viewer.user_scn
-    if scn.ngeom >= scn.maxgeom:
-      return
-    scn.ngeom += 1
-    geom = scn.geoms[scn.ngeom - 1]
-    geom.category = mujoco.mjtCatBit.mjCAT_DECOR
-    mujoco.mjv_initGeom(
-      geom=geom,
-      type=mujoco.mjtGeom.mjGEOM_ARROW.value,
-      size=np.zeros(3),
-      pos=np.zeros(3),
-      mat=np.zeros(9),
-      rgba=np.array([1.0, 0.2, 0.2, 0.8], dtype=np.float32),
+  def _update_depth_camera_visualizers(
+    self, visualizer: MujocoNativeDebugVisualizer
+  ) -> None:
+    sim_data = self.env.unwrapped.sim.data
+    for sensor in self.env.unwrapped.scene.sensors.values():
+      if not isinstance(sensor, CameraSensor) or "depth" not in sensor.cfg.data_types:
+        continue
+      depth = sensor.data.depth
+      if depth is None:
+        continue
+
+      cam_id = sensor.camera_idx
+      cam_pos = sim_data.cam_xpos[self.env_idx, cam_id].cpu().numpy()
+      cam_mat = sim_data.cam_xmat[self.env_idx, cam_id].cpu().numpy().reshape(3, 3)
+      self._draw_depth_camera_frustum(visualizer, sensor, cam_pos, cam_mat)
+      self._draw_depth_camera_ground_projection(
+        visualizer=visualizer,
+        sensor=sensor,
+        depth=depth[self.env_idx, :, :, 0].cpu().numpy(),
+        cam_pos=cam_pos,
+        cam_mat=cam_mat,
+      )
+
+  def _draw_depth_camera_frustum(
+    self,
+    visualizer: MujocoNativeDebugVisualizer,
+    sensor: CameraSensor,
+    cam_pos: np.ndarray,
+    cam_mat: np.ndarray,
+  ) -> None:
+    assert self.mjm is not None
+    cam_id = sensor.camera_idx
+    fovy = math.radians(float(self.mjm.cam_fovy[cam_id]))
+    aspect = sensor.cfg.width / sensor.cfg.height
+    tan_v = math.tan(fovy * 0.5)
+    tan_h = tan_v * aspect
+    local_dirs = np.array(
+      [
+        [-tan_h, -tan_v, -1.0],
+        [tan_h, -tan_v, -1.0],
+        [tan_h, tan_v, -1.0],
+        [-tan_h, tan_v, -1.0],
+      ],
+      dtype=np.float64,
     )
-    mujoco.mjv_connector(
-      geom=geom,
-      type=mujoco.mjtGeom.mjGEOM_ARROW.value,
-      width=0.02,
-      from_=arrow_top,
-      to=arrow_bottom,
+    local_dirs /= np.linalg.norm(local_dirs, axis=1, keepdims=True)
+    corners = cam_pos + (cam_mat @ local_dirs.T).T * self._DEPTH_CAMERA_FRUSTUM_LENGTH
+
+    for corner in corners:
+      visualizer.add_cylinder(
+        cam_pos,
+        corner,
+        radius=0.006,
+        color=self._DEPTH_CAMERA_FRUSTUM_COLOR,
+      )
+    for i in range(4):
+      visualizer.add_cylinder(
+        corners[i],
+        corners[(i + 1) % 4],
+        radius=0.005,
+        color=self._DEPTH_CAMERA_FRUSTUM_COLOR,
+      )
+
+  def _draw_depth_camera_ground_projection(
+    self,
+    visualizer: MujocoNativeDebugVisualizer,
+    sensor: CameraSensor,
+    depth: np.ndarray,
+    cam_pos: np.ndarray,
+    cam_mat: np.ndarray,
+  ) -> None:
+    height, width = depth.shape
+    stride = self._DEPTH_CAMERA_PROJECTION_STRIDE
+    ys = np.arange(0, height, stride)
+    xs = np.arange(0, width, stride)
+    grid_x, grid_y = np.meshgrid(xs, ys, indexing="xy")
+
+    local_dirs = self._depth_camera_pixel_dirs(
+      sensor=sensor,
+      pixel_x=grid_x.reshape(-1),
+      pixel_y=grid_y.reshape(-1),
     )
+    depth_values = depth[grid_y.reshape(-1), grid_x.reshape(-1)].astype(np.float64)
+    valid = (
+      np.isfinite(depth_values)
+      & (depth_values > 1.0e-4)
+      & (depth_values <= self._DEPTH_CAMERA_MAX_RANGE)
+    )
+    if not valid.any():
+      return
+
+    local_dirs = local_dirs[valid]
+    depth_values = depth_values[valid]
+    ray_scale = depth_values / np.maximum(-local_dirs[:, 2], 1.0e-6)
+    local_points = local_dirs * ray_scale[:, None]
+    points = (cam_mat @ local_points.T).T + cam_pos
+    points[:, 2] = self._depth_camera_ground_z() + self._DEPTH_CAMERA_GROUND_Z_OFFSET
+
+    for point in points:
+      visualizer.add_sphere(
+        point,
+        radius=self._DEPTH_CAMERA_POINT_RADIUS,
+        color=self._DEPTH_CAMERA_PROJECTION_COLOR,
+      )
+
+  def _depth_camera_pixel_dirs(
+    self,
+    sensor: CameraSensor,
+    pixel_x: np.ndarray,
+    pixel_y: np.ndarray,
+  ) -> np.ndarray:
+    assert self.mjm is not None
+    cam_id = sensor.camera_idx
+    fovy = math.radians(float(self.mjm.cam_fovy[cam_id]))
+    aspect = sensor.cfg.width / sensor.cfg.height
+    tan_v = math.tan(fovy * 0.5)
+    tan_h = tan_v * aspect
+    u = 2.0 * pixel_x / max(sensor.cfg.width - 1, 1) - 1.0
+    v = 2.0 * pixel_y / max(sensor.cfg.height - 1, 1) - 1.0
+    dirs = np.stack(
+      [
+        u * tan_h,
+        v * tan_v,
+        -np.ones_like(u, dtype=np.float64),
+      ],
+      axis=1,
+    )
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    return dirs
+
+  def _depth_camera_ground_z(self) -> float:
+    try:
+      origins = self.env.unwrapped.scene.env_origins
+      return float(origins[self.env_idx, 2].cpu().item())
+    except Exception:
+      return 0.0
 
   def _sync_env_state_to_mjdata(
     self, target_data: mujoco.MjData, sim_data: _SimDataProtocol, env_idx: int
@@ -373,11 +483,42 @@ class NativeMujocoViewer(BaseViewer):
     # Restore main env's model fields.
     self._sync_model_fields(sim, self.env_idx)
 
+  # Inertial fields that shift subtree_com (and thus the tracking camera).
+  _INERTIAL_FIELDS = frozenset({"body_ipos", "body_mass"})
+
+  # Fields that affect rendering. Physics-only fields (geom_aabb,
+  # geom_rbound, dof_*, jnt_*, actuator_*, tendon_*, etc.) are skipped.
+  _VISUAL_FIELDS = frozenset(
+    {
+      "qpos0",  # Needed for correct mj_forward kinematics (qpos - qpos0).
+      "geom_rgba",
+      "geom_size",
+      "geom_pos",
+      "geom_quat",
+      "mat_rgba",
+      "site_pos",
+      "site_quat",
+      "body_pos",
+      "body_quat",
+      "body_ipos",
+      "body_inertia",
+      "body_iquat",
+      "body_mass",
+      "cam_pos",
+      "cam_quat",
+      "cam_fovy",
+      "cam_intrinsic",
+      "light_pos",
+      "light_dir",
+    }
+  )
+
   def _sync_model_fields(self, sim: _SimProtocol, env_idx: int) -> None:
     """Sync visually-relevant DR'd model fields from GPU to MjModel."""
-    assert self.mjm is not None
-    fields = sim.expanded_fields & VIEWER_MODEL_FIELDS
-    sync_model_fields(self.mjm, sim.model, fields, env_idx)
+    for field_name in sim.expanded_fields & self._VISUAL_FIELDS:
+      src = getattr(sim.model, field_name)[env_idx].cpu().numpy()
+      dst = getattr(self.mjm, field_name)
+      dst[:] = src.reshape(dst.shape)
 
   def _stabilize_tracking_camera(self) -> None:
     """Pin the tracked body's subtree_com to its frame origin (xpos).

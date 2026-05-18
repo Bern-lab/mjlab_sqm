@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import torch
@@ -18,6 +18,9 @@ from mjlab.utils.lab_api.string import (
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
+  from mjlab.tasks.velocity.mdp.target_heading_command import (
+    TargetHeadingVelocityCommand,
+  )
   from mjlab.viewer.debug_visualizer import DebugVisualizer
 
 
@@ -240,13 +243,15 @@ def feet_air_time(
 
 def feet_clearance(
   env: ManagerBasedRlEnv,
-  target_height: float,
   height_sensor_name: str,
+  target_height: float | None = None,
+  min_height: float | None = None,
+  max_height: float | None = None,
   command_name: str | None = None,
   command_threshold: float = 0.01,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Penalize deviation from target clearance height, weighted by foot velocity."""
+  """Penalize foot clearance outside a target height or height range."""
   asset: Entity = env.scene[asset_cfg.name]
   height_sensor = env.scene[height_sensor_name]
   assert isinstance(height_sensor, TerrainHeightSensor), (
@@ -255,7 +260,16 @@ def feet_clearance(
   foot_height = height_sensor.data.heights  # [B, F]
   foot_vel_xy = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, :2]  # [B, F, 2]
   vel_norm = torch.norm(foot_vel_xy, dim=-1)  # [B, F]
-  delta = torch.abs(foot_height - target_height)  # [B, F]
+  if min_height is not None or max_height is not None:
+    if min_height is None or max_height is None:
+      raise ValueError("feet_clearance requires both min_height and max_height.")
+    if min_height > max_height:
+      raise ValueError("feet_clearance min_height must be <= max_height.")
+    delta = torch.relu(min_height - foot_height) + torch.relu(foot_height - max_height)
+  else:
+    if target_height is None:
+      raise ValueError("feet_clearance requires target_height or min/max height.")
+    delta = torch.abs(foot_height - target_height)  # [B, F]
   cost = torch.sum(delta * vel_norm, dim=1)  # [B]
   if command_name is not None:
     command = env.command_manager.get_command(command_name)
@@ -464,3 +478,158 @@ class variable_posture:
     error_squared = torch.square(current_joint_pos - desired_joint_pos)
 
     return torch.exp(-torch.mean(error_squared / (std**2), dim=1))
+
+def idle_penalty(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  command_threshold: float = 0.2,
+  velocity_threshold: float = 0.1,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize standing nearly still when a clear velocity command is given."""
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+
+  commanded_speed = torch.norm(command[:, :2], dim=1)
+  actual_speed = torch.norm(asset.data.root_link_lin_vel_b[:, :2], dim=1)
+
+  penalty = (
+    (commanded_speed > command_threshold) &
+    (actual_speed < velocity_threshold)
+  ).float()
+
+  env.extras["log"]["Metrics/idle_penalty_ratio"] = torch.mean(penalty)
+  return penalty
+
+def feet_gait(
+        env: ManagerBasedRlEnv,
+        period: float,
+        offset: list[float],
+        threshold: float,
+        command_threshold: float,
+        command_name: str,
+        sensor_name: str,
+) -> torch.Tensor:
+    sensor: ContactSensor = env.scene[sensor_name]
+    current_contact_time = sensor.data.current_contact_time
+    assert current_contact_time is not None, "Enable track_air_time=True for this contact sensor."
+    is_contact = current_contact_time > 0
+    global_phase = ((env.episode_length_buf * env.step_dt) / period).unsqueeze(1)
+    offsets = torch.as_tensor(offset, device=env.device, dtype=global_phase.dtype).view(1, -1)
+    leg_phase = (global_phase + offsets) % 1.0
+    is_stance = (leg_phase < threshold)
+    reward = (is_stance == is_contact).float().mean(dim=1)
+    if command_name is not None:
+        command = env.command_manager.get_command(command_name)
+        if command is not None:
+            linear_norm = torch.norm(command[:, :2], dim=1)
+            angular_norm = torch.abs(command[:, 2])
+            total_command = linear_norm + angular_norm
+            scale = (total_command > command_threshold).float()
+            reward *= scale
+    return reward
+
+def target_progress(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  min_distance: float = 0.05,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward world-frame velocity projected toward the active target point."""
+  command_term = env.command_manager.get_term(command_name)
+  required_attrs = ("target_pos_w", "has_target", "is_target_env")
+  if not all(hasattr(command_term, name) for name in required_attrs):
+    return torch.zeros(env.num_envs, device=env.device)
+  command_term = cast("TargetHeadingVelocityCommand", command_term)
+
+  asset: Entity = env.scene[asset_cfg.name]
+  target_vec_xy = command_term.target_pos_w[:, :2] - asset.data.root_link_pos_w[:, :2]
+  target_dist = torch.norm(target_vec_xy, dim=-1)
+  target_dir_xy = target_vec_xy / torch.clamp(
+    target_dist.unsqueeze(-1), min=min_distance
+  )
+  lin_vel_w_xy = asset.data.root_link_lin_vel_w[:, :2]
+  progress_speed = torch.sum(lin_vel_w_xy * target_dir_xy, dim=-1)
+  active = command_term.has_target & command_term.is_target_env
+
+  return torch.clamp(progress_speed, min=0.0) * active.float()
+
+
+def target_reached_bonus(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+) -> torch.Tensor:
+  """Sparse bonus emitted after the command detects target arrival."""
+  command_term = env.command_manager.get_term(command_name)
+  if not hasattr(command_term, "target_reached_this_step"):
+    return torch.zeros(env.num_envs, device=env.device)
+  command_term = cast("TargetHeadingVelocityCommand", command_term)
+  return command_term.target_reached_this_step.float()
+
+def base_height_above_support_value(
+  env: ManagerBasedRlEnv,
+  height_sensor_name: str,
+  contact_sensor_name: str,
+  asset_cfg: SceneEntityCfg = SceneEntityCfg(
+    "robot", site_names=("left_foot", "right_foot")
+  ),
+) -> torch.Tensor:
+  """Base height relative to the terrain under the support foot/feet."""
+  asset: Entity = env.scene[asset_cfg.name]
+  height_sensor = env.scene[height_sensor_name]
+  contact_sensor = env.scene[contact_sensor_name]
+  assert isinstance(height_sensor, TerrainHeightSensor), (
+    "base_height_above_support_value requires a TerrainHeightSensor, got "
+    f"{type(height_sensor).__name__}"
+  )
+  assert isinstance(contact_sensor, ContactSensor), (
+    "base_height_above_support_value requires a ContactSensor, got "
+    f"{type(contact_sensor).__name__}"
+  )
+  assert contact_sensor.data.found is not None
+
+  base_z = asset.data.root_link_pos_w[:, 2]
+  foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+  terrain_z_under_feet = foot_z - height_sensor.data.heights
+
+  contact = (contact_sensor.data.found > 0).float()
+  contact_sum = contact.sum(dim=1).clamp_min(1.0)
+  support_terrain_z = (terrain_z_under_feet * contact).sum(dim=1) / contact_sum
+  fallback_terrain_z = terrain_z_under_feet.max(dim=1).values
+  has_contact = contact.sum(dim=1) > 0
+  terrain_z = torch.where(has_contact, support_terrain_z, fallback_terrain_z)
+
+  return base_z - terrain_z
+
+
+def base_height_above_support(
+    env,
+    height_sensor_name: str,
+    contact_sensor_name: str,
+    min_height: float = 0.74,
+    error_scale: float = 1.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+) -> torch.Tensor:
+    asset = env.scene[asset_cfg.name]
+    height_sensor = env.scene[height_sensor_name]
+    contact_sensor = env.scene[contact_sensor_name]
+
+    base_z = asset.data.root_link_pos_w[:, 2]
+
+    foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+    foot_height_above_terrain = height_sensor.data.heights
+    terrain_z_under_feet = foot_z - foot_height_above_terrain
+
+    contact = (contact_sensor.data.found > 0).float()
+    contact_sum = contact.sum(dim=1).clamp_min(1.0)
+
+    support_terrain_z = (terrain_z_under_feet * contact).sum(dim=1) / contact_sum
+    fallback_terrain_z = terrain_z_under_feet.max(dim=1).values
+    has_contact = contact.sum(dim=1) > 0
+
+    terrain_z = torch.where(has_contact, support_terrain_z, fallback_terrain_z)
+    base_height_rel = base_z - terrain_z
+
+    height_error = torch.relu(min_height - base_height_rel) * error_scale
+    return torch.square(height_error)

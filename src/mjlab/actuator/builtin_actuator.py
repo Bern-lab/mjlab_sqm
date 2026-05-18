@@ -34,9 +34,9 @@ if TYPE_CHECKING:
 class BuiltinPositionActuatorCfg(ActuatorCfg):
   """Configuration for MuJoCo built-in position actuator.
 
-  Under the hood, this creates a <position> actuator for each target and sets the
-  stiffness, damping and effort limits accordingly. If armature or frictionloss are
-  set, they override the corresponding joint/tendon properties from XML.
+  Under the hood, this creates a <position> actuator for each target and sets
+  the stiffness, damping and effort limits accordingly. It also modifies the target's
+  properties, namely armature and frictionloss.
   """
 
   stiffness: float
@@ -87,7 +87,6 @@ class BuiltinPositionActuator(Actuator[BuiltinPositionActuatorCfg]):
         effort_limit=self.cfg.effort_limit,
         armature=self.cfg.armature,
         frictionloss=self.cfg.frictionloss,
-        viscous_damping=self.cfg.viscous_damping,
         transmission_type=self.cfg.transmission_type,
       )
       self._mjs_actuators.append(actuator)
@@ -100,9 +99,9 @@ class BuiltinPositionActuator(Actuator[BuiltinPositionActuatorCfg]):
 class BuiltinMotorActuatorCfg(ActuatorCfg):
   """Configuration for MuJoCo built-in motor actuator.
 
-  Under the hood, this creates a <motor> actuator for each target and sets its effort
-  limit and gear ratio accordingly. If armature or frictionloss are set, they override
-  the corresponding joint/tendon properties from XML.
+  Under the hood, this creates a <motor> actuator for each target and sets
+  its effort limit and gear ratio accordingly. It also modifies the target's
+  properties, namely armature and frictionloss.
   """
 
   effort_limit: float
@@ -142,7 +141,6 @@ class BuiltinMotorActuator(Actuator[BuiltinMotorActuatorCfg]):
         gear=self.cfg.gear,
         armature=self.cfg.armature,
         frictionloss=self.cfg.frictionloss,
-        viscous_damping=self.cfg.viscous_damping,
         transmission_type=self.cfg.transmission_type,
       )
       self._mjs_actuators.append(actuator)
@@ -156,8 +154,8 @@ class BuiltinVelocityActuatorCfg(ActuatorCfg):
   """Configuration for MuJoCo built-in velocity actuator.
 
   Under the hood, this creates a <velocity> actuator for each target and sets the
-  damping gain. If armature or frictionloss are set, they override the corresponding
-  joint/tendon properties from XML.
+  damping gain. It also modifies the target's properties, namely armature and
+  frictionloss.
   """
 
   damping: float
@@ -205,7 +203,6 @@ class BuiltinVelocityActuator(Actuator[BuiltinVelocityActuatorCfg]):
         effort_limit=self.cfg.effort_limit,
         armature=self.cfg.armature,
         frictionloss=self.cfg.frictionloss,
-        viscous_damping=self.cfg.viscous_damping,
         transmission_type=self.cfg.transmission_type,
       )
       self._mjs_actuators.append(actuator)

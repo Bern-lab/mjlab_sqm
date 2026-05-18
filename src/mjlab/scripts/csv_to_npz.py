@@ -1,15 +1,35 @@
-from typing import Any
-
+from typing import Any, Literal
 import numpy as np
 import torch
+import torch.nn.functional as F
 import tyro
 from tqdm import tqdm
+import os,json
 
 import mjlab
+
 from mjlab.entity import Entity
 from mjlab.scene import Scene
 from mjlab.sim.sim import Simulation, SimulationCfg
 from mjlab.tasks.tracking.config.g1.env_cfgs import unitree_g1_flat_tracking_env_cfg
+from mjlab.tasks.tracking.config.k1.env_cfgs import booster_k1_flat_tracking_env_cfg
+from mjlab.tasks.tracking.config.bumi.env_cfgs import noetix_bumi_flat_tracking_env_cfg
+from mjlab.tasks.tracking.config.pm01.env_cfgs import engineai_pm01_flat_tracking_env_cfg
+# from mjlab.tasks.tracking.config.n1.env_cfgs import N1FlatEnvCfg
+from mjlab.tasks.tracking.config.gr3.env_cfgs import fourier_gr3_flat_tracking_env_cfg
+from mjlab.tasks.tracking.config.e1.env_cfgs import noetix_e1_flat_tracking_env_cfg
+# from mjlab.tasks.tracking.config.z1.env_cfgs import Z1FlatEnvCfg
+from mjlab.tasks.tracking.config.oli.env_cfgs import limx_oli_flat_tracking_env_cfg
+
+RobotType = Literal["unitree_g1", "booster_k1", "noetix_bumi", "engineai_pm01", "fourier_n1", "fourier_gr3","noetix_e1", "magicbot_z1","limx_oli"]
+robot_json_dict = {}
+current_path = os.path.abspath(__file__) #/home/ubt2204/work/mjlab_pm01_v1/
+current_dir_path = os.path.dirname(current_path)
+root_path = os.path.abspath(os.path.join(current_dir_path, os.pardir))
+#TODO 需要确认新路径是否正确
+with open(root_path+os.path.join('/tasks/tracking/config/body_name.json'),'r') as f:
+    robot_json_dict = json.load(f)
+
 from mjlab.utils.lab_api.math import (
   axis_angle_from_quat,
   quat_conjugate,
@@ -18,7 +38,128 @@ from mjlab.utils.lab_api.math import (
 )
 from mjlab.viewer.offscreen_renderer import OffscreenRenderer
 from mjlab.viewer.viewer_config import ViewerConfig
+from pathlib import Path
+import os
+SRC_ROOT = Path(__file__).resolve().parents[3]
 
+
+def quat_to_rotation_matrix(quat: torch.Tensor) -> torch.Tensor:
+  """Convert quaternion to rotation matrix.
+
+Args:
+  quat: [N, 4] tensor in [w, x, y, z] format
+Returns:
+  rotmat: [N, 3, 3] rotation matrices
+"""
+  # Normalize quaternion
+  quat = F.normalize(quat, dim=-1)
+
+  w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
+
+  # Compute rotation matrix elements
+  xx, yy, zz = x * x, y * y, z * z
+  xy, xz, yz = x * y, x * z, y * z
+  wx, wy, wz = w * x, w * y, w * z
+
+  # Build rotation matrix
+  rotmat = torch.zeros(*quat.shape[:-1], 3, 3, device=quat.device)
+  rotmat[..., 0, 0] = 1 - 2 * (yy + zz)
+  rotmat[..., 0, 1] = 2 * (xy - wz)
+  rotmat[..., 0, 2] = 2 * (xz + wy)
+  rotmat[..., 1, 0] = 2 * (xy + wz)
+  rotmat[..., 1, 1] = 1 - 2 * (xx + zz)
+  rotmat[..., 1, 2] = 2 * (yz - wx)
+  rotmat[..., 2, 0] = 2 * (xz - wy)
+  rotmat[..., 2, 1] = 2 * (yz + wx)
+  rotmat[..., 2, 2] = 1 - 2 * (xx + yy)
+
+  return rotmat
+
+
+def matrix_to_euler_zyx(rotmat: torch.Tensor) -> torch.Tensor:
+  """Convert rotation matrix to Euler angles in ZYX order.
+
+Args:
+  rotmat: [N, 3, 3] rotation matrices
+Returns:
+  euler: [N, 3] Euler angles [z, y, x]
+"""
+  sy = torch.sqrt(rotmat[..., 0, 0] ** 2 + rotmat[..., 1, 0] ** 2)
+
+  singular = sy < 1e-6
+
+  x = torch.where(singular,
+                  torch.atan2(-rotmat[..., 1, 2], rotmat[..., 1, 1]),
+                  torch.atan2(rotmat[..., 2, 1], rotmat[..., 2, 2]))
+  y = torch.where(singular,
+                  torch.atan2(-rotmat[..., 2, 0], sy),
+                  torch.atan2(-rotmat[..., 2, 0], sy))
+  z = torch.where(singular,
+                  torch.zeros_like(rotmat[..., 0, 0]),
+                  torch.atan2(rotmat[..., 1, 0], rotmat[..., 0, 0]))
+
+  return torch.stack([z, y, x], dim=-1)
+
+
+def euler_to_rotation_matrix_zyx(euler: torch.Tensor) -> torch.Tensor:
+  """Convert Euler angles in ZYX order to rotation matrix.
+
+Args:
+  euler: [N, 3] Euler angles [z, y, x]
+Returns:
+  rotmat: [N, 3, 3] rotation matrices
+"""
+  z, y, x = euler[..., 0], euler[..., 1], euler[..., 2]
+
+  # Compute sin and cos
+  cx, sx = torch.cos(x), torch.sin(x)
+  cy, sy = torch.cos(y), torch.sin(y)
+  cz, sz = torch.cos(z), torch.sin(z)
+
+  # Build rotation matrix (ZYX order: Rz * Ry * Rx)
+  rotmat = torch.zeros(*euler.shape[:-1], 3, 3, device=euler.device)
+
+  rotmat[..., 0, 0] = cz * cy
+  rotmat[..., 0, 1] = cz * sy * sx - sz * cx
+  rotmat[..., 0, 2] = cz * sy * cx + sz * sx
+  rotmat[..., 1, 0] = sz * cy
+  rotmat[..., 1, 1] = sz * sy * sx + cz * cx
+  rotmat[..., 1, 2] = sz * sy * cx - cz * sx
+  rotmat[..., 2, 0] = -sy
+  rotmat[..., 2, 1] = cy * sx
+  rotmat[..., 2, 2] = cy * cx
+
+  return rotmat
+
+
+def process_rotation_matrices_with_yaw_compensation(root_quat: torch.Tensor) -> torch.Tensor:
+  """Process body quaternions to rotation matrices with yaw angle compensation.
+
+将第一帧的yaw设置为0，后续帧的yaw值相对于第一帧进行调整
+
+Args:
+  root_quat: [N, 4] root body quaternions in [w, x, y, z] format
+Returns:
+  rot_mat: [N, 3, 3] processed rotation matrices with yaw compensation
+"""
+  # Step 1: Convert quaternion to rotation matrix
+  traj_root_rotmat = quat_to_rotation_matrix(root_quat)  # [N, 3, 3]
+
+  # Step 2: Convert all rotation matrices to Euler angles (ZYX order)
+  all_euler = matrix_to_euler_zyx(traj_root_rotmat)  # [N, 3] -> [z, y, x]
+
+  # Step 3: Get the initial yaw angle from the first frame
+  init_yaw = all_euler[0, 0].clone()  # First frame's yaw (z component)
+
+  # Step 4: Subtract the initial yaw from all frames' yaw angles
+  # This makes the first frame's yaw = 0, and preserves relative yaw changes
+  compensated_euler = all_euler.clone()
+  compensated_euler[:, 0] = all_euler[:, 0] - init_yaw  # Subtract initial yaw from all yaw angles
+
+  # Step 5: Convert compensated Euler angles back to rotation matrices
+  rot_mat = euler_to_rotation_matrix_zyx(compensated_euler)  # [N, 3, 3]
+
+  return rot_mat
 
 class MotionLoader:
   def __init__(
@@ -304,41 +445,111 @@ def run_sim(
           "body_ang_vel_w",
         ):
           log[k] = np.stack(log[k], axis=0)
+        from pathlib import Path
+        input_dir = Path(input_file).parent
+        output_npz = input_dir / f"{output_name}.npz"
+        # 检查路径是否存在
+        output_npz.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Saving motion data to {output_npz}...")
+        np.savez(output_npz, **log)
+        # Generate PT trajectory file for C++ deployment
+        print("\n[INFO]: Generating PT trajectory file for C++ deployment...")
 
-        print("Saving to /tmp/motion.npz...")
-        np.savez("/tmp/motion.npz", **log)
+        # Convert numpy arrays to torch tensors (CPU)
+        joint_pos_tensor = torch.from_numpy(log["joint_pos"]).float()  # [N, num_joints]
+        joint_vel_tensor = torch.from_numpy(log["joint_vel"]).float()  # [N, num_joints]
+        body_quat_w_array = log["body_quat_w"]  # numpy array
 
-        print("Uploading to Weights & Biases...")
-        import wandb
+        print(f"[INFO]: body_quat_w shape: {body_quat_w_array.shape}")
 
-        COLLECTION = output_name
-        run = wandb.init(project="csv_to_npz", name=COLLECTION)
-        print(f"[INFO]: Logging motion to wandb: {COLLECTION}")
-        REGISTRY = "motions"
-        logged_artifact = run.log_artifact(
-          artifact_or_path="/tmp/motion.npz", name=COLLECTION, type=REGISTRY
-        )
-        run.link_artifact(
-          artifact=logged_artifact,
-          target_path=f"wandb-registry-{REGISTRY}/{COLLECTION}",
-        )
-        print(f"[INFO]: Motion saved to wandb registry: {REGISTRY}/{COLLECTION}")
+        # Extract root body quaternion
+        # body_quat_w shape is [N, num_bodies, 4] (from body_link_quat_w)
+        if len(body_quat_w_array.shape) == 3:  # [N, num_bodies, 4]
+          root_quat = torch.from_numpy(body_quat_w_array[:, 0, :]).float()  # [N, 4] - first body
+        else:  # [N, num_bodies * 4]
+          root_quat = torch.from_numpy(body_quat_w_array[:, :4]).float()  # [N, 4] - first 4 elements
+
+        print(f"[INFO]: Root quaternion shape: {root_quat.shape}")
+
+        # Apply yaw compensation to rotation matrices
+        rot_mat_tensor = process_rotation_matrices_with_yaw_compensation(root_quat)  # [N, 3, 3]
+        print(f"[INFO]: Rotation matrix shape after yaw compensation: {rot_mat_tensor.shape}")
+
+        # Print yaw compensation details
+        if rot_mat_tensor.shape[0] > 0:
+          # Get yaw angles before and after compensation for verification
+          original_rotmat = quat_to_rotation_matrix(root_quat)
+          original_euler = matrix_to_euler_zyx(original_rotmat)
+          compensated_euler = matrix_to_euler_zyx(rot_mat_tensor)
+
+          original_first_yaw = torch.rad2deg(original_euler[0, 0])
+          original_last_yaw = torch.rad2deg(original_euler[-1, 0])
+          compensated_first_yaw = torch.rad2deg(compensated_euler[0, 0])
+          compensated_last_yaw = torch.rad2deg(compensated_euler[-1, 0])
+
+          print(f"[INFO]: Yaw compensation applied:")
+          print(
+            f"        Original - First frame: {original_first_yaw.item():.2f}°, Last frame: {original_last_yaw.item():.2f}°")
+          print(
+            f"        Compensated - First frame: {compensated_first_yaw.item():.2f}°, Last frame: {compensated_last_yaw.item():.2f}°")
+          print(f"        Yaw offset removed: {original_first_yaw.item():.2f}°")
+
+        # Apply IsaacLab joint reordering for C++ deployment compatibility
+        # This mapping converts from MJLab/CSV order to IsaacLab order
+        # IsaacLab groups joints by type: yaw axes, pitch axes, elbows, etc.
+
+        isaaclab_joint_mapping = []
+        if 'k1' in robot.spec.modelname:
+          isaaclab_joint_mapping = robot_json_dict['booster_k1']["isaaclab_joint_mapping"]
+        elif 'bumi' in robot.spec.modelname:
+          isaaclab_joint_mapping = robot_json_dict['noetix_bumi']["isaaclab_joint_mapping"]
+        elif 'pm01' in robot.spec.modelname:
+          isaaclab_joint_mapping = robot_json_dict['engineai_pm01']["isaaclab_joint_mapping"]
+        elif 'n1' in robot.spec.modelname:
+          isaaclab_joint_mapping = robot_json_dict['fourier_n1']["isaaclab_joint_mapping"]
+        elif 'gr3' in robot.spec.modelname:
+          isaaclab_joint_mapping = robot_json_dict['fourier_gr3']["isaaclab_joint_mapping"]
+        elif 'e1' in robot.spec.modelname:
+          isaaclab_joint_mapping = robot_json_dict['noetix_e1']["isaaclab_joint_mapping"]
+        elif 'z1' in robot.spec.modelname:
+          isaaclab_joint_mapping = robot_json_dict['magicbot_z1']["isaaclab_joint_mapping"]
+        elif 'oli' in robot.spec.modelname:
+          isaaclab_joint_mapping = robot_json_dict['limx_oli']["isaaclab_joint_mapping"]
+        # Reorder joints for IsaacLab compatibility
+        joint_pos_isaaclab = joint_pos_tensor[:, isaaclab_joint_mapping]
+        joint_vel_isaaclab = joint_vel_tensor[:, isaaclab_joint_mapping]
+
+        print(f"[INFO]: Applied IsaacLab joint reordering for C++ compatibility")
+
+        # Create PT data dictionary (CPU version, IsaacLab joint order)
+        pt_data_cpu = {
+          "dof_pos": joint_pos_isaaclab,
+          "dof_vel": joint_vel_isaaclab,
+          "rot_mat": rot_mat_tensor
+        }
+
+        # Save CPU version as PT file (IsaacLab joint order for C++ deployment)
+        output_pt = input_dir / f"{output_name}_traj.pt"
+        torch.save(pt_data_cpu, output_pt)
+        print(f"[INFO]: PT trajectory file saved to {output_pt} (IsaacLab joint order)")
+        print(
+          f"[INFO]: PT data shapes - dof_pos: {joint_pos_isaaclab.shape}, dof_vel: {joint_vel_isaaclab.shape}, rot_mat: {rot_mat_tensor.shape}")
 
         if render:
-          import mediapy as media
+          from moviepy import ImageSequenceClip
+          output_video = input_dir / f"{output_name}.mp4"
+          print(f"Creating video: {output_video}...")
+          clip = ImageSequenceClip(frames, fps=output_fps)
+          clip.write_videofile(str(output_video))
+          print(f"[INFO]: Video saved to {output_video}")
 
-          print("Creating video...")
-          media.write_video("./motion.mp4", frames, fps=output_fps)
 
-          print("Logging video to wandb...")
-          wandb.log({"motion_video": wandb.Video("./motion.mp4", format="mp4")})
-
-        wandb.finish()
 
 
 def main(
   input_file: str,
   output_name: str,
+  robot_type: RobotType = "noetix_bumi",
   input_fps: float = 30.0,
   output_fps: float = 50.0,
   device: str = "cuda:0",
@@ -363,7 +574,28 @@ def main(
   sim_cfg = SimulationCfg()
   sim_cfg.mujoco.timestep = 1.0 / output_fps
 
-  scene = Scene(unitree_g1_flat_tracking_env_cfg().scene, device=device)
+  env_cfg = None
+  # Get robot-specific configuration
+  if robot_type == "unitree_g1":
+    env_cfg = unitree_g1_flat_tracking_env_cfg()
+  elif robot_type == "booster_k1":
+    env_cfg = booster_k1_flat_tracking_env_cfg()
+  elif robot_type == "engineai_pm01":
+    env_cfg = engineai_pm01_flat_tracking_env_cfg()
+  elif robot_type == "limx_oli":
+    env_cfg = limx_oli_flat_tracking_env_cfg()
+  elif robot_type == "noetix_bumi":
+    env_cfg = noetix_bumi_flat_tracking_env_cfg()
+  elif robot_type == "noetix_e1":
+    env_cfg = noetix_e1_flat_tracking_env_cfg()
+  elif robot_type == "fourier_gr3":
+    env_cfg = fourier_gr3_flat_tracking_env_cfg()
+  #TODO 记得新增机型时需要更新此处
+
+  else:
+    raise ValueError(f"Unknown robot type: {robot_type}")
+
+  scene = Scene(env_cfg.scene, device=device)
   model = scene.compile()
 
   sim = Simulation(num_envs=1, cfg=sim_cfg, model=model, device=device)
@@ -379,7 +611,7 @@ def main(
       entity_name="robot",
       distance=2.0,
       elevation=-5.0,
-      azimuth=20,
+      azimuth=-90,
     )
     renderer = OffscreenRenderer(
       model=sim.mj_model,
@@ -388,40 +620,31 @@ def main(
     )
     renderer.initialize()
 
+  joint_names = []
+  # Robot-specific joint names
+  if robot_type == "unitree_g1":
+    joint_names = robot_json_dict['unitree_g1']['joint_names']
+  elif robot_type == "booster_k1":
+    joint_names = robot_json_dict['booster_k1']['joint_names']
+  elif robot_type == "noetix_bumi":
+    joint_names = robot_json_dict['noetix_bumi']['joint_names']
+  elif robot_type == "engineai_pm01":
+    joint_names = robot_json_dict['engineai_pm01']['joint_names']
+  elif robot_type == "fourier_n1":
+    joint_names = robot_json_dict['fourier_n1']['joint_names']
+  elif robot_type == "fourier_gr3":
+    joint_names = robot_json_dict['fourier_gr3']['joint_names']
+  elif robot_type == "noetix_e1":
+    joint_names = robot_json_dict['noetix_e1']['joint_names']
+  elif robot_type == "magicbot_z1":
+    joint_names = robot_json_dict['magicbot_z1']['joint_names']
+  elif robot_type == "limx_oli":
+    joint_names = robot_json_dict['limx_oli']['joint_names']
+
   run_sim(
     sim=sim,
     scene=scene,
-    joint_names=[
-      "left_hip_pitch_joint",
-      "left_hip_roll_joint",
-      "left_hip_yaw_joint",
-      "left_knee_joint",
-      "left_ankle_pitch_joint",
-      "left_ankle_roll_joint",
-      "right_hip_pitch_joint",
-      "right_hip_roll_joint",
-      "right_hip_yaw_joint",
-      "right_knee_joint",
-      "right_ankle_pitch_joint",
-      "right_ankle_roll_joint",
-      "waist_yaw_joint",
-      "waist_roll_joint",
-      "waist_pitch_joint",
-      "left_shoulder_pitch_joint",
-      "left_shoulder_roll_joint",
-      "left_shoulder_yaw_joint",
-      "left_elbow_joint",
-      "left_wrist_roll_joint",
-      "left_wrist_pitch_joint",
-      "left_wrist_yaw_joint",
-      "right_shoulder_pitch_joint",
-      "right_shoulder_roll_joint",
-      "right_shoulder_yaw_joint",
-      "right_elbow_joint",
-      "right_wrist_roll_joint",
-      "right_wrist_pitch_joint",
-      "right_wrist_yaw_joint",
-    ],
+    joint_names=joint_names,
     input_fps=input_fps,
     input_file=input_file,
     output_fps=output_fps,

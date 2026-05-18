@@ -1,6 +1,4 @@
 import os
-import sys
-import traceback
 from importlib.metadata import entry_points
 from pathlib import Path
 
@@ -44,12 +42,8 @@ def _import_registered_packages() -> None:
   for entry_point in mjlab_tasks:
     try:
       entry_point.load()
-    except Exception:
-      print(
-        f"[WARN] Failed to load task package '{entry_point.name}' ({entry_point.value}):",
-        file=sys.stderr,
-      )
-      traceback.print_exc(file=sys.stderr)
+    except Exception as e:
+      print(f"[WARN] Failed to load task package {entry_point.name}: {e}")
 
 
 def _configure_mediapy() -> None:

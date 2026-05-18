@@ -11,12 +11,11 @@ import numpy as np
 import torch
 
 from mjlab.entity import Entity, EntityCfg
-from mjlab.entity.variants import VariantMetadata
 from mjlab.sensor import BuiltinSensor, RayCastSensor, Sensor, SensorCfg
 from mjlab.sensor.camera_sensor import CameraSensor
 from mjlab.sensor.sensor_context import SensorContext
 from mjlab.terrains.terrain_entity import TerrainEntity, TerrainEntityCfg
-from mjlab.utils.spec import export_spec, non_default_option_fields
+from mjlab.utils.spec import export_spec
 
 _SCENE_XML = Path(__file__).parent / "scene.xml"
 
@@ -132,16 +131,6 @@ class Scene:
   def device(self) -> str:
     return self._device
 
-  def collect_variant_info(
-    self,
-  ) -> list[tuple[str, VariantMetadata]]:
-    """Collect variant metadata for entities with mesh variants."""
-    result: list[tuple[str, VariantMetadata]] = []
-    for name, ent in self._entities.items():
-      if ent.variant_metadata is not None:
-        result.append((f"{name}/", ent.variant_metadata))
-    return result
-
   def __getitem__(self, key: str) -> Any:
     if key in self._sensors:
       return self._sensors[key]
@@ -224,14 +213,6 @@ class Scene:
         key_qpos.append(np.array(ent.spec.keys[0].qpos))
         key_ctrl.append(np.array(ent.spec.keys[0].ctrl))
         ent.spec.delete(ent.spec.keys[0])
-      non_default = non_default_option_fields(ent.spec.option)
-      if non_default:
-        fields = ", ".join(non_default)
-        warnings.warn(
-          f"Entity '{ent_name}' has non-default <option> fields ({fields}) that will"
-          " not be propagated by MjSpec.attach(). Use MujocoCfg instead.",
-          stacklevel=2,
-        )
       frame = self._spec.worldbody.add_frame()
       self._spec.attach(ent.spec, prefix=f"{ent_name}/", frame=frame)
     # Add merged keyframe to scene spec.
@@ -252,14 +233,6 @@ class Scene:
     terrain = TerrainEntity(self._cfg.terrain, device=self._device)
     self._terrain = terrain
     self._entities["terrain"] = terrain
-    non_default = non_default_option_fields(terrain.spec.option)
-    if non_default:
-      fields = ", ".join(non_default)
-      warnings.warn(
-        f"Terrain has non-default <option> fields ({fields}) that will not be"
-        " propagated by MjSpec.attach(). Use MujocoCfg instead.",
-        stacklevel=2,
-      )
     frame = self._spec.worldbody.add_frame()
     self._spec.attach(terrain.spec, prefix="", frame=frame)
 
