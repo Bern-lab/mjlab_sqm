@@ -113,6 +113,27 @@ def _format_size(path: Path) -> float:
   return path.stat().st_size / MB
 
 
+def _checkpoint_iteration(path: Path) -> int | None:
+  prefix = "model_"
+  stem = path.stem
+  if not stem.startswith(prefix):
+    return None
+
+  iteration = stem.removeprefix(prefix)
+  if not iteration.isdigit():
+    return None
+  return int(iteration)
+
+
+def _file_sort_key(file_path: Path, kind: FileKind) -> tuple[int, float | int, float, str]:
+  if kind.key == "checkpoints":
+    iteration = _checkpoint_iteration(file_path)
+    if iteration is not None:
+      return (1, iteration, file_path.stat().st_mtime, file_path.name)
+
+  return (0, file_path.stat().st_mtime, file_path.stat().st_mtime, file_path.name)
+
+
 def _has_readable_zip_directory(path: Path) -> bool:
   try:
     with zipfile.ZipFile(path) as archive:
@@ -125,14 +146,9 @@ def _has_readable_zip_directory(path: Path) -> bool:
 def _iter_run_dir_candidates(log_root: Path) -> Iterable[Path]:
   yield log_root
 
-  for exp_name_dir in sorted(log_root.iterdir()):
-    if not exp_name_dir.is_dir():
-      continue
-
-    yield exp_name_dir
-    for run_dir in sorted(exp_name_dir.iterdir()):
-      if run_dir.is_dir():
-        yield run_dir
+  for candidate in sorted(log_root.rglob("*")):
+    if candidate.is_dir():
+      yield candidate
 
 
 def _looks_like_run_dir(path: Path) -> bool:
@@ -204,11 +220,11 @@ def _select_latest_file(files: list[Path], kind: FileKind) -> Path:
   if kind.key != "checkpoints":
     return files[-1]
 
-  readable_files = [f for f in files if _has_readable_zip_directory(f)]
-  if readable_files:
-    return readable_files[-1]
+  for file_path in reversed(files):
+    if _has_readable_zip_directory(file_path):
+      return file_path
 
-  print("    [WARN] 未找到可读 checkpoint，按修改时间保留最新文件")
+  print("    [WARN] 未找到可读 checkpoint，按文件名/修改时间保留最新文件")
   return files[-1]
 
 
@@ -260,14 +276,15 @@ def clean_keep_latest(
     for kind in kinds:
       files = sorted(
         (f for f in exp_dir.glob(kind.pattern) if f.is_file()),
-        key=lambda f: f.stat().st_mtime,
+        key=lambda f: _file_sort_key(f, kind),
       )
       if len(files) <= 1:
         continue
 
+      print(f"  [{kind.label}] 共 {len(files)} 个，正在选择保留文件")
       latest = _select_latest_file(files, kind)
       to_delete = [f for f in files if f != latest]
-      print(f"  [{kind.label}] 共 {len(files)} 个，保留最新，删除 {len(to_delete)} 个")
+      print(f"  [{kind.label}] 保留最新，删除 {len(to_delete)} 个")
       for file_path in to_delete:
         _record_file(file_path, file_stats[kind.key], args.dry_run, now)
       print(f"    [KEEP] {latest.name}")
