@@ -161,9 +161,15 @@ def test_step_boundary_rewards_only_on_target_heading_teacher(
       assert cfg.rewards["foot_step_lip_volume_penalty"].params[
         "min_terrain_level"
       ] == 3
+      assert cfg.rewards["foot_step_lip_volume_penalty"].params[
+        "nearest_boundaries"
+      ] == 4
       assert cfg.rewards["toe_step_riser_slab_penalty"].params[
         "min_terrain_level"
       ] == 3
+      assert cfg.rewards["toe_step_riser_slab_penalty"].params[
+        "nearest_boundaries"
+      ] == 4
       assert cfg.rewards["toe_step_riser_slab_penalty"].params[
         "slab_depth"
       ] == 0.04

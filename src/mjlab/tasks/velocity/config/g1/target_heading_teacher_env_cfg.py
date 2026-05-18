@@ -129,7 +129,7 @@ def unitree_g1_target_heading_teacher_env_cfg(
   cfg.sim.contact_sensor_maxmatch = 400
   cfg.sim.nconmax = 256
   cfg.sim.nccdmax = 64
-  cfg.sim.use_cuda_graph = False
+  cfg.sim.use_cuda_graph = True
 
   robot_cfg = get_g1_robot_cfg()
   articulation = robot_cfg.articulation
@@ -213,10 +213,10 @@ def unitree_g1_target_heading_teacher_env_cfg(
     parent_body="robot/torso_link",
     pos=(0.10, 0.0, 0.45),
     quat=(0.95371695, 0.0, -0.30070580, 0.0),
-    fovy=80.0,#垂直仰角
-    width=64,
-    height=64,
-    data_types=("depth", "segmentation"),
+    fovy=80.0,  # 垂直仰角
+    width=48,
+    height=48,
+    data_types=("depth",),
     enabled_geom_groups=(0, 2, 3),
     use_shadows=False,
     use_textures=True,
