@@ -48,6 +48,8 @@ class PlayConfig:
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
+  show_step_danger_zones: bool = False
+  """Show non-colliding stair lip/riser danger zones when the terrain supports them."""
 
   # Internal flag used by demo script.
   _demo_mode: tyro.conf.Suppress[bool] = False
@@ -60,6 +62,18 @@ def run_play(task_id: str, cfg: PlayConfig):
 
   env_cfg = load_env_cfg(task_id, play=True)
   agent_cfg = load_rl_cfg(task_id)
+
+  if cfg.show_step_danger_zones:
+    terrain_cfg = (
+      env_cfg.scene.terrain.terrain_generator
+      if env_cfg.scene.terrain is not None
+      else None
+    )
+    if terrain_cfg is not None and hasattr(terrain_cfg, "step_danger_visualization"):
+      terrain_cfg.step_danger_visualization.enabled = True
+      print("[INFO]: Step danger-zone visualization enabled")
+    else:
+      print("[WARN]: Step danger-zone visualization requested, but this terrain does not support it")
 
   DUMMY_MODE = cfg.agent in {"zero", "random"}
   TRAINED_MODE = not DUMMY_MODE

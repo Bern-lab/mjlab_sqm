@@ -190,7 +190,7 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       debug_vis=True,
       ranges=UniformVelocityCommandCfg.Ranges(
         lin_vel_x=(-1.0, 1.0),
-        lin_vel_y=(-1.0, 1.0),
+        lin_vel_y=(0.0, 0.0),
         ang_vel_z=(-0.5, 0.5),
         heading=(-math.pi, math.pi),
       ),
@@ -335,11 +335,11 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.feet_clearance,
       weight=-2.0,
       params={
-        "min_height": 0.08,
+        "min_height": 0.1,
         "max_height": 0.25,
         "height_sensor_name": "foot_height_scan",
         "command_name": "twist",
-        "command_threshold": 0.05,
+        "command_threshold": 0.0,
         "asset_cfg": SceneEntityCfg("robot", site_names=()),  # Set per-robot.
       },
     ),

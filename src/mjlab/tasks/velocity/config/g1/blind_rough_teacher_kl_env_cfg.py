@@ -109,17 +109,11 @@ def _configure_teacherkl_student_env(
       },
       {
         "step": 3000 * 24,
-        "lin_vel_x": (-0.7, 1.0),
-        "lin_vel_y": (0.0, 0.0),
-        "ang_vel_z": (-0.6, 0.6),
-      },
-      {
-        "step": 15000 * 24,
         "lin_vel_x": (0.0, 1.2),
         "lin_vel_y": (0.0, 0.0),
         "ang_vel_z": (-0.8, 0.8),
       },
-    ]
+    ]#方便教师蒸馏，速度范围一样，从3000步开始
 
   cfg.rewards["joint_acc_l2"] = RewardTermCfg(
     func=mdp.joint_acc_l2,

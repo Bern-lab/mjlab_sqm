@@ -47,6 +47,9 @@ from mjlab.terrains.terrain_entity import TerrainEntityCfg as TerrainEntityCfg
 from mjlab.terrains.terrain_generator import (
   FlatPatchSamplingCfg as FlatPatchSamplingCfg,
 )
+from mjlab.terrains.terrain_generator import (
+  StepDangerVisualizationCfg as StepDangerVisualizationCfg,
+)
 from mjlab.terrains.terrain_generator import SubTerrainCfg as SubTerrainCfg
 from mjlab.terrains.terrain_generator import TerrainGenerator as TerrainGenerator
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg as TerrainGeneratorCfg

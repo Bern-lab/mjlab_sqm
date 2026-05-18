@@ -84,6 +84,17 @@ class PlotCfg:
   background_alpha: float = 0.5  # Background alpha for plots.
 
 
+def _terrain_geom_mask(mj_model: mujoco.MjModel) -> np.ndarray:
+  mask = np.zeros(mj_model.ngeom, dtype=bool)
+  for geom_id in range(mj_model.ngeom):
+    name = mj_model.geom(geom_id).name or ""
+    if name == "terrain" or name.startswith("terrain_"):
+      mask[geom_id] = True
+  if not mask.any():
+    mask = np.asarray(mj_model.geom_group) == 0
+  return mask
+
+
 class _SimDataProtocol(Protocol):
   qpos: "_TensorArrayProtocol"
   qvel: "_TensorArrayProtocol"
@@ -119,9 +130,9 @@ class NativeMujocoViewer(BaseViewer):
   _DEPTH_CAMERA_PROJECTION_COLOR = (0.02, 0.42, 0.10, 0.72)
   _DEPTH_CAMERA_FRUSTUM_COLOR = (0.25, 0.25, 0.25, 0.45)
   _DEPTH_CAMERA_MAX_RANGE = 5.0
-  _DEPTH_CAMERA_PROJECTION_STRIDE = 3
-  _DEPTH_CAMERA_POINT_RADIUS = 0.035
-  _DEPTH_CAMERA_GROUND_Z_OFFSET = 0.02
+  _DEPTH_CAMERA_PROJECTION_STRIDE = 2
+  _DEPTH_CAMERA_POINT_RADIUS = 0.005
+  _DEPTH_CAMERA_SURFACE_Z_OFFSET = 0.002
   _DEPTH_CAMERA_FRUSTUM_LENGTH = 0.75
 
   def __init__(
@@ -156,6 +167,7 @@ class NativeMujocoViewer(BaseViewer):
     self._show_all_envs: bool = False
     self._plot_cfg = plot_cfg or PlotCfg()
     self._figures_dirty: bool = False
+    self._terrain_geom_mask: np.ndarray | None = None
 
     self.env_idx = self.cfg.env_idx
     self._mj_lock = Lock()
@@ -312,9 +324,11 @@ class NativeMujocoViewer(BaseViewer):
     for sensor in self.env.unwrapped.scene.sensors.values():
       if not isinstance(sensor, CameraSensor) or "depth" not in sensor.cfg.data_types:
         continue
-      depth = sensor.data.depth
+      camera_data = sensor.data
+      depth = camera_data.depth
       if depth is None:
         continue
+      segmentation = camera_data.segmentation
 
       cam_id = sensor.camera_idx
       cam_pos = sim_data.cam_xpos[self.env_idx, cam_id].cpu().numpy()
@@ -324,6 +338,11 @@ class NativeMujocoViewer(BaseViewer):
         visualizer=visualizer,
         sensor=sensor,
         depth=depth[self.env_idx, :, :, 0].cpu().numpy(),
+        segmentation=(
+          segmentation[self.env_idx, :, :, 0].cpu().numpy()
+          if segmentation is not None
+          else None
+        ),
         cam_pos=cam_pos,
         cam_mat=cam_mat,
       )
@@ -373,6 +392,7 @@ class NativeMujocoViewer(BaseViewer):
     visualizer: MujocoNativeDebugVisualizer,
     sensor: CameraSensor,
     depth: np.ndarray,
+    segmentation: np.ndarray | None,
     cam_pos: np.ndarray,
     cam_mat: np.ndarray,
   ) -> None:
@@ -388,20 +408,23 @@ class NativeMujocoViewer(BaseViewer):
       pixel_y=grid_y.reshape(-1),
     )
     depth_values = depth[grid_y.reshape(-1), grid_x.reshape(-1)].astype(np.float64)
+    ray_scale = depth_values / np.maximum(-local_dirs[:, 2], 1.0e-6)
     valid = (
       np.isfinite(depth_values)
       & (depth_values > 1.0e-4)
-      & (depth_values <= self._DEPTH_CAMERA_MAX_RANGE)
+      & (ray_scale <= self._DEPTH_CAMERA_MAX_RANGE)
     )
+    if segmentation is not None:
+      geom_ids = segmentation[grid_y.reshape(-1), grid_x.reshape(-1)].astype(np.int64)
+      valid &= self._terrain_hit_mask(geom_ids)
     if not valid.any():
       return
 
     local_dirs = local_dirs[valid]
-    depth_values = depth_values[valid]
-    ray_scale = depth_values / np.maximum(-local_dirs[:, 2], 1.0e-6)
+    ray_scale = ray_scale[valid]
     local_points = local_dirs * ray_scale[:, None]
     points = (cam_mat @ local_points.T).T + cam_pos
-    points[:, 2] = self._depth_camera_ground_z() + self._DEPTH_CAMERA_GROUND_Z_OFFSET
+    points[:, 2] += self._DEPTH_CAMERA_SURFACE_Z_OFFSET
 
     for point in points:
       visualizer.add_sphere(
@@ -435,12 +458,18 @@ class NativeMujocoViewer(BaseViewer):
     dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
     return dirs
 
-  def _depth_camera_ground_z(self) -> float:
-    try:
-      origins = self.env.unwrapped.scene.env_origins
-      return float(origins[self.env_idx, 2].cpu().item())
-    except Exception:
-      return 0.0
+  def _terrain_hit_mask(self, geom_ids: np.ndarray) -> np.ndarray:
+    assert self.mjm is not None
+    if (
+      self._terrain_geom_mask is None
+      or self._terrain_geom_mask.shape[0] != self.mjm.ngeom
+    ):
+      self._terrain_geom_mask = _terrain_geom_mask(self.mjm)
+
+    terrain_hit = np.zeros(geom_ids.shape, dtype=bool)
+    in_bounds = (geom_ids >= 0) & (geom_ids < self._terrain_geom_mask.shape[0])
+    terrain_hit[in_bounds] = self._terrain_geom_mask[geom_ids[in_bounds]]
+    return terrain_hit
 
   def _sync_env_state_to_mjdata(
     self, target_data: mujoco.MjData, sim_data: _SimDataProtocol, env_idx: int

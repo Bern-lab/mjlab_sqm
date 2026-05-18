@@ -114,8 +114,11 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     self_collision_cfg,
   )
 
-  if cfg.scene.terrain is not None and cfg.scene.terrain.terrain_generator is not None:
-    cfg.scene.terrain.terrain_generator.curriculum = True
+  if cfg.scene.terrain is not None:
+    cfg.scene.terrain.terrain_generator = (
+      _blind_rough_play_terrain_cfg() if play else BLIND_HIGH_STAIRS_TERRAINS_CFG
+    )
+    cfg.scene.terrain.max_init_terrain_level = 2
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -247,6 +250,39 @@ def unitree_g1_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     weight=-1.0,
     params={"sensor_name": self_collision_cfg.name, "force_threshold": 10.0},
   )
+
+  if "command_vel" in cfg.curriculum:
+    cfg.curriculum["command_vel"].params["velocity_stages"] = [
+      {
+        "step": 0,
+        "lin_vel_x": (-0.5, 0.8),
+        "lin_vel_y": (0.0, 0.0),
+        "ang_vel_z": (-0.5, 0.5),
+      },
+      {
+        "step": 3000 * 24,
+        "lin_vel_x": (-0.7, 1.0),
+        "lin_vel_y": (0.0, 0.0),
+        "ang_vel_z": (-0.6, 0.6),
+      },
+      {
+        "step": 10000 * 24,
+        "lin_vel_x": (0.0, 1.2),
+        "lin_vel_y": (0.0, 0.0),
+        "ang_vel_z": (-0.8, 0.8),
+      },
+    ]
+
+  cfg.rewards["joint_acc_l2"] = RewardTermCfg(
+    func=mdp.joint_acc_l2,
+    weight=-2.5e-7,
+  )
+  cfg.rewards["action_acc_l2"] = RewardTermCfg(
+    func=mdp.action_acc_l2,
+    weight=-0.05,
+  )
+  cfg.rewards["body_ang_vel"].weight = -0.08
+  cfg.rewards["angular_momentum"].weight = -0.03
 
   # Apply play mode overrides.
   if play:
@@ -501,6 +537,18 @@ def unitree_g1_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # Disable terrain curriculum (not present in play mode since rough clears all).
   cfg.curriculum.pop("terrain_levels", None)
+
+  cfg.rewards.pop("joint_acc_l2", None)
+  cfg.rewards.pop("action_acc_l2", None)
+  cfg.rewards["body_ang_vel"].weight = -0.05
+  cfg.rewards["angular_momentum"].weight = -0.02
+
+  if "command_vel" in cfg.curriculum:
+    cfg.curriculum["command_vel"].params["velocity_stages"] = [
+      {"step": 0, "lin_vel_x": (-1.0, 1.0), "ang_vel_z": (-0.5, 0.5)},
+      {"step": 5000 * 24, "lin_vel_x": (-1.5, 2.0), "ang_vel_z": (-0.7, 0.7)},
+      {"step": 10000 * 24, "lin_vel_x": (-2.0, 3.0)},
+    ]
 
   if play:
     twist_cmd = cfg.commands["twist"]

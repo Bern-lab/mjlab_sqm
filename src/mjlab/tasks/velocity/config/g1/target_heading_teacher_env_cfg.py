@@ -14,6 +14,7 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import (
   CameraSensorCfg,
   ContactMatch,
@@ -34,6 +35,11 @@ from mjlab.tasks.velocity.mdp.teacher_target_heading_rewards import (
 from mjlab.tasks.velocity.mdp.velocity_command import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from mjlab.terrains import FlatPatchSamplingCfg, TerrainGeneratorCfg
+from mjlab.terrains.config import BLIND_HIGH_STAIRS_TERRAINS_CFG
+from mjlab.terrains.primitive_terrains import (
+  BoxInvertedPyramidStairsTerrainCfg,
+  BoxPyramidStairsTerrainCfg,
+)
 
 
 def _apply_teacher_actor(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -74,6 +80,24 @@ def _add_target_flat_patch_sampling(
     sub_cfg.flat_patch_sampling = dict(sub_cfg.flat_patch_sampling or {})
     sub_cfg.flat_patch_sampling["target"] = target_sampling
   return cfg
+
+
+def _target_heading_play_terrain_cfg() -> TerrainGeneratorCfg:
+  terrain_cfg = deepcopy(BLIND_HIGH_STAIRS_TERRAINS_CFG)
+  terrain_cfg.curriculum = False
+  terrain_cfg.num_rows = 5
+  terrain_cfg.num_cols = 5
+  terrain_cfg.border_width = 10.0
+
+  for terrain_name in ("high_stairs", "high_stairs_inv"):
+    sub_terrain = terrain_cfg.sub_terrains[terrain_name]
+    assert isinstance(
+      sub_terrain,
+      BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
+    )
+    sub_terrain.step_height_range = (0.14, 0.14)
+
+  return terrain_cfg
 
 
 def _disable_observation_noise_and_delay(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -192,7 +216,7 @@ def unitree_g1_target_heading_teacher_env_cfg(
     fovy=80.0,#垂直仰角
     width=64,
     height=64,
-    data_types=("depth",),
+    data_types=("depth", "segmentation"),
     enabled_geom_groups=(0, 2, 3),
     use_shadows=False,
     use_textures=True,
@@ -215,8 +239,13 @@ def unitree_g1_target_heading_teacher_env_cfg(
   )
   _disable_observation_noise_and_delay(cfg)
 
-  if cfg.scene.terrain is not None and cfg.scene.terrain.terrain_generator is not None:
-    cfg.scene.terrain.terrain_generator.curriculum = True
+  if cfg.scene.terrain is not None:
+    cfg.scene.terrain.terrain_generator = (
+      _target_heading_play_terrain_cfg()
+      if play
+      else deepcopy(BLIND_HIGH_STAIRS_TERRAINS_CFG)
+    )
+    cfg.scene.terrain.max_init_terrain_level = 2
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -230,24 +259,18 @@ def unitree_g1_target_heading_teacher_env_cfg(
   velocity_stages = [
     {
       "step": 0,
-      "lin_vel_x": (0.0, 0.45),
+      "lin_vel_x": (-0.5, 0.8),
       "lin_vel_y": (0.0, 0.0),
-      "ang_vel_z": (-0.4, 0.4),
+      "ang_vel_z": (-0.5, 0.5),
     },
     {
       "step": 3000 * 24,
-        "lin_vel_x": (0.0, 0.7),
+      "lin_vel_x": (-0.7, 1.0),
       "lin_vel_y": (0.0, 0.0),
       "ang_vel_z": (-0.6, 0.6),
     },
     {
-      "step": 8000 * 24,
-      "lin_vel_x": (0.0, 1.0),
-      "lin_vel_y": (0.0, 0.0),
-      "ang_vel_z": (-0.8, 0.8),
-    },
-    {
-      "step": 15000 * 24,
+      "step": 10000 * 24,
       "lin_vel_x": (0.0, 1.2),
       "lin_vel_y": (0.0, 0.0),
       "ang_vel_z": (-0.8, 0.8),
@@ -406,9 +429,9 @@ def unitree_g1_target_heading_teacher_env_cfg(
     zero_lateral_velocity=True,
     debug_vis=True,
     ranges=TeacherTargetHeadingVelocityCommandCfg.Ranges(
-      lin_vel_x=(-1.0, 1.7),
-      lin_vel_y=(-1.0, 1.0),
-      ang_vel_z=(-0.7, 0.7),
+      lin_vel_x=(-0.5, 0.8),
+      lin_vel_y=(0.0, 0.0),
+      ang_vel_z=(-0.5, 0.5),
       heading=(-math.pi, math.pi),
     ),
   )
@@ -425,7 +448,6 @@ def unitree_g1_target_heading_teacher_env_cfg(
     twist_cmd.target_tile_radius = 1
 
   cfg.commands["twist"] = twist_cmd
-  cfg.curriculum.pop("command_vel", None)
 
   cfg.rewards["target_progress"] = RewardTermCfg(
     func=teacher_target_progress,
@@ -436,6 +458,38 @@ def unitree_g1_target_heading_teacher_env_cfg(
     func=teacher_target_reached_bonus,
     weight=0.4,
     params={"command_name": "twist"},
+  )
+  cfg.rewards["foot_step_lip_volume_penalty"] = RewardTermCfg(
+    func=mdp.foot_step_lip_volume_penalty,
+    weight=-4.0,
+    params={
+      "edge_radius": 0.05,
+      "edge_height_band": 0.06,
+      "nearest_boundaries": 4,
+      "min_terrain_level": 3,
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+      ),
+    },
+  )
+  cfg.rewards["toe_step_riser_slab_penalty"] = RewardTermCfg(
+    func=mdp.toe_step_riser_slab_penalty,
+    weight=-0.8,
+    params={
+      "slab_depth": 0.04,
+      "u_margin": 0.02,
+      "v_margin": 0.02,
+      "toe_x_min": 0.09,
+      "toe_v_threshold": 0.05,
+      "surface_tol": 0.005,
+      "nearest_boundaries": 4,
+      "min_terrain_level": 3,
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+      ),
+    },
   )
 
   return cfg

@@ -55,6 +55,30 @@ class TerrainOutput:
   """List of geometry elements comprising this terrain."""
   flat_patches: dict[str, np.ndarray] | None = None#关联平坦点，保存找到的点位置，key是点的名字，value是一个(N, 3)的数组，包含N个平坦点的世界坐标。如果某个地形没有生成平坦点，则对应的值为None。
   """Named sets of flat patch positions, each an (N, 3) array. None if not configured."""
+  step_boundaries: np.ndarray | None = None
+  """Height-discontinuity boundaries as ``[p0_high, p1_high, normal_to_low, z_low, z_high]`` rows."""
+
+
+@dataclass
+class StepDangerVisualizationCfg:
+  """Visualization-only geometry for step lip/riser danger zones."""
+
+  enabled: bool = False
+  """If True, add non-colliding translucent geoms for step danger zones."""
+  lip_radius: float = 0.05
+  """Radius of the high-side lip tube, matching the lip reward radius."""
+  slab_depth: float = 0.04
+  """Depth of the toe-only riser slab extending from the riser to the low side."""
+  slab_u_margin: float = 0.02
+  """Extra half-width along the step edge for the riser slab visual."""
+  slab_v_margin: float = 0.02
+  """Extra half-height along the riser for the slab visual."""
+  geom_group: int = 4
+  """MuJoCo visualization group for danger-zone geoms."""
+  lip_rgba: RGBA = (1.0, 0.10, 0.05, 0.35)
+  """RGBA color for lip edge tubes."""
+  slab_rgba: RGBA = (1.0, 0.75, 0.05, 0.22)
+  """RGBA color for riser slabs."""
 
 
 @dataclass
@@ -124,6 +148,10 @@ class TerrainGeneratorCfg:
   """Min and max difficulty values used when generating sub-terrains."""
   add_lights: bool = False
   """If True, adds a directional light above the terrain grid."""
+  step_danger_visualization: StepDangerVisualizationCfg = field(
+    default_factory=StepDangerVisualizationCfg
+  )
+  """Optional non-colliding visual geoms for step lip/riser danger zones."""
 
 
 class TerrainGenerator:
@@ -170,6 +198,19 @@ class TerrainGenerator:
     self.np_rng = np.random.default_rng(seed)
 
     self.terrain_origins = np.zeros((self.cfg.num_rows, self._num_cols, 3))
+    self._step_boundaries_tiles: list[list[np.ndarray]] = [
+      [
+        np.zeros((0, 11), dtype=np.float32)
+        for _ in range(self._num_cols)
+      ]
+      for _ in range(self.cfg.num_rows)
+    ]
+    self.step_boundaries_by_tile = np.zeros(
+      (self.cfg.num_rows, self._num_cols, 0, 11), dtype=np.float32
+    )
+    self.step_boundary_counts = np.zeros(
+      (self.cfg.num_rows, self._num_cols), dtype=np.int32
+    )
 
     # Pre-allocate flat patch storage by scanning all sub-terrain configs.
     self.flat_patches: dict[str, np.ndarray] = {}
@@ -205,6 +246,7 @@ class TerrainGenerator:
       toc = time.perf_counter()
       print(f"Terrain generation took {toc - tic:.4f} seconds.")
 
+    self._finalize_step_boundaries()
     self._add_terrain_border(spec)
     self._add_grid_lights(spec)
 
@@ -336,7 +378,134 @@ class TerrainGenerator:
         # every slot contains a valid position for reset_root_state_from_flat_patches.
         arr[sub_row, sub_col] = spawn_origin
 
+    if output.step_boundaries is not None and len(output.step_boundaries) > 0:
+      boundaries = np.asarray(output.step_boundaries, dtype=np.float32).copy()
+      if boundaries.ndim != 2 or boundaries.shape[1] != 11:
+        raise ValueError(
+          "TerrainOutput.step_boundaries must have shape [N, 11], got "
+          f"{boundaries.shape}."
+        )
+      boundaries[:, 0:3] += world_position
+      boundaries[:, 3:6] += world_position
+      boundaries[:, 9:11] += world_position[2]
+      self._step_boundaries_tiles[sub_row][sub_col] = boundaries
+      self._add_step_danger_visual_geoms(spec, boundaries)
+
     return spawn_origin
+
+  def _add_step_danger_visual_geoms(
+    self, spec: mujoco.MjSpec, boundaries: np.ndarray
+  ) -> None:
+    vis_cfg = self.cfg.step_danger_visualization
+    if not vis_cfg.enabled:
+      return
+
+    body = spec.body("terrain")
+    for boundary in boundaries:
+      p0 = boundary[0:3]
+      p1 = boundary[3:6]
+      normal_to_low = boundary[6:9]
+      z_low = float(boundary[9])
+      z_high = float(boundary[10])
+
+      lip = body.add_geom(
+        type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+        size=(vis_cfg.lip_radius, 0.0, 0.0),
+      )
+      lip.fromto[:] = np.concatenate([p0, p1])
+      lip.rgba[:] = vis_cfg.lip_rgba
+      lip.group = vis_cfg.geom_group
+      lip.contype = 0
+      lip.conaffinity = 0
+
+      slab_geom = self._make_riser_slab_geom(
+        body=body,
+        p0=p0,
+        p1=p1,
+        normal_to_low=normal_to_low,
+        z_low=z_low,
+        z_high=z_high,
+        vis_cfg=vis_cfg,
+      )
+      if slab_geom is not None:
+        slab_geom.rgba[:] = vis_cfg.slab_rgba
+        slab_geom.group = vis_cfg.geom_group
+        slab_geom.contype = 0
+        slab_geom.conaffinity = 0
+
+  def _make_riser_slab_geom(
+    self,
+    body: mujoco.MjsBody,
+    p0: np.ndarray,
+    p1: np.ndarray,
+    normal_to_low: np.ndarray,
+    z_low: float,
+    z_high: float,
+    vis_cfg: StepDangerVisualizationCfg,
+  ) -> mujoco.MjsGeom | None:
+    edge = p1 - p0
+    edge_len = float(np.linalg.norm(edge))
+    height = z_high - z_low
+    if edge_len <= 1e-6 or height <= 1e-6 or vis_cfg.slab_depth <= 0.0:
+      return None
+
+    x_axis = edge / edge_len
+    y_axis = normal_to_low.astype(np.float64)
+    y_axis[2] = 0.0
+    y_axis = y_axis - np.dot(y_axis, x_axis) * x_axis
+    y_norm = np.linalg.norm(y_axis)
+    if y_norm <= 1e-6:
+      return None
+    y_axis = y_axis / y_norm
+    z_axis = np.cross(x_axis, y_axis)
+    z_norm = np.linalg.norm(z_axis)
+    if z_norm <= 1e-6:
+      return None
+    z_axis = z_axis / z_norm
+
+    mat = np.column_stack([x_axis, y_axis, z_axis])
+    quat = np.zeros(4, dtype=np.float64)
+    mujoco.mju_mat2Quat(quat, mat.reshape(-1))
+
+    center = 0.5 * (p0 + p1)
+    center = center.astype(np.float64)
+    center[2] = 0.5 * (z_low + z_high)
+    center += y_axis * (0.5 * vis_cfg.slab_depth)
+
+    size = (
+      0.5 * edge_len + vis_cfg.slab_u_margin,
+      0.5 * vis_cfg.slab_depth,
+      0.5 * height + vis_cfg.slab_v_margin,
+    )
+    return body.add_geom(
+      type=mujoco.mjtGeom.mjGEOM_BOX,
+      size=size,
+      pos=center,
+      quat=quat,
+    )
+
+  def _finalize_step_boundaries(self) -> None:
+    max_count = 0
+    for row_boundaries in self._step_boundaries_tiles:
+      for boundaries in row_boundaries:
+        max_count = max(max_count, len(boundaries))
+
+    self.step_boundaries_by_tile = np.zeros(
+      (self.cfg.num_rows, self._num_cols, max_count, 11), dtype=np.float32
+    )
+    self.step_boundary_counts = np.zeros(
+      (self.cfg.num_rows, self._num_cols), dtype=np.int32
+    )
+    if max_count == 0:
+      return
+
+    for row in range(self.cfg.num_rows):
+      for col in range(self._num_cols):
+        boundaries = self._step_boundaries_tiles[row][col]
+        count = len(boundaries)
+        self.step_boundary_counts[row, col] = count
+        if count > 0:
+          self.step_boundaries_by_tile[row, col, :count] = boundaries
 
   def _add_terrain_border(self, spec: mujoco.MjSpec) -> None:
     if self.cfg.border_width <= 0.0:

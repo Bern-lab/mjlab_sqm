@@ -34,6 +34,83 @@ from mjlab.utils.color import (
 _MUJOCO_BLUE = (0.20, 0.45, 0.95)
 _MUJOCO_RED = (0.90, 0.30, 0.30)
 _MUJOCO_GREEN = (0.25, 0.80, 0.45)
+_STEP_BOUNDARY_EPS = 1e-6
+
+
+def _append_step_boundary(
+  boundaries: list[np.ndarray],
+  p0_high: tuple[float, float, float],
+  p1_high: tuple[float, float, float],
+  normal_to_low: tuple[float, float, float],
+  z_low: float,
+  z_high: float,
+) -> None:
+  if z_high <= z_low + _STEP_BOUNDARY_EPS:
+    return
+  p0 = np.asarray(p0_high, dtype=np.float32)
+  p1 = np.asarray(p1_high, dtype=np.float32)
+  edge_vec = p1 - p0
+  if np.linalg.norm(edge_vec) <= _STEP_BOUNDARY_EPS:
+    return
+  normal = np.asarray(normal_to_low, dtype=np.float32)
+  normal[2] = 0.0
+  normal_norm = np.linalg.norm(normal)
+  if normal_norm <= _STEP_BOUNDARY_EPS:
+    return
+  normal = normal / normal_norm
+  boundaries.append(
+    np.concatenate(
+      [p0, p1, normal, np.asarray([z_low, z_high], dtype=np.float32)]
+    )
+  )
+
+
+def _append_square_step_boundaries(
+  boundaries: list[np.ndarray],
+  terrain_center: tuple[float, float, float] | list[float],
+  terrain_size: tuple[float, float],
+  step_width: float,
+  boundary_index: int,
+  z_low: float,
+  z_high: float,
+  normal_direction: str,
+) -> None:
+  half_x = terrain_size[0] / 2.0
+  half_y = terrain_size[1] / 2.0
+  offset = boundary_index * step_width
+  cx, cy, _ = terrain_center
+  x_min = cx - half_x + offset
+  x_max = cx + half_x - offset
+  y_min = cy - half_y + offset
+  y_max = cy + half_y - offset
+  if x_max <= x_min + _STEP_BOUNDARY_EPS or y_max <= y_min + _STEP_BOUNDARY_EPS:
+    return
+
+  if normal_direction == "outward":
+    top_normal = (0.0, 1.0, 0.0)
+    bottom_normal = (0.0, -1.0, 0.0)
+    right_normal = (1.0, 0.0, 0.0)
+    left_normal = (-1.0, 0.0, 0.0)
+  elif normal_direction == "inward":
+    top_normal = (0.0, -1.0, 0.0)
+    bottom_normal = (0.0, 1.0, 0.0)
+    right_normal = (-1.0, 0.0, 0.0)
+    left_normal = (1.0, 0.0, 0.0)
+  else:
+    raise ValueError(f"Unknown normal_direction: {normal_direction}")
+
+  _append_step_boundary(
+    boundaries, (x_min, y_max, z_high), (x_max, y_max, z_high), top_normal, z_low, z_high
+  )
+  _append_step_boundary(
+    boundaries, (x_min, y_min, z_high), (x_max, y_min, z_high), bottom_normal, z_low, z_high
+  )
+  _append_step_boundary(
+    boundaries, (x_max, y_min, z_high), (x_max, y_max, z_high), right_normal, z_low, z_high
+  )
+  _append_step_boundary(
+    boundaries, (x_min, y_min, z_high), (x_min, y_max, z_high), left_normal, z_low, z_high
+  )
 
 
 def _get_platform_color(
@@ -85,6 +162,7 @@ class BoxPyramidStairsTerrainCfg(SubTerrainCfg):
     del rng  # Unused.
     boxes = []
     box_colors = []
+    step_boundaries: list[np.ndarray] = []
 
     body = spec.body("terrain")
 
@@ -124,6 +202,18 @@ class BoxPyramidStairsTerrainCfg(SubTerrainCfg):
       self.size[0] - 2 * self.border_width,
       self.size[1] - 2 * self.border_width,
     )
+    if not self.holes:
+      for boundary_index in range(num_steps + 1):
+        _append_square_step_boundaries(
+          step_boundaries,
+          terrain_center,
+          terrain_size,
+          self.step_width,
+          boundary_index,
+          z_low=boundary_index * step_height,
+          z_high=(boundary_index + 1) * step_height,
+          normal_direction="outward",
+        )
     rgba = brand_ramp(_MUJOCO_BLUE, 0.5)
     for k in range(num_steps):
       t = k / max(num_steps - 1, 1)
@@ -246,7 +336,14 @@ class BoxPyramidStairsTerrainCfg(SubTerrainCfg):
       TerrainGeometry(geom=box, color=color)
       for box, color in zip(boxes, box_colors, strict=True)
     ]
-    return TerrainOutput(origin=origin, geometries=geometries)
+    boundaries = (
+      np.asarray(step_boundaries, dtype=np.float32)
+      if step_boundaries
+      else None
+    )
+    return TerrainOutput(
+      origin=origin, geometries=geometries, step_boundaries=boundaries
+    )
 
 
 @dataclass(kw_only=True)
@@ -257,6 +354,7 @@ class BoxInvertedPyramidStairsTerrainCfg(BoxPyramidStairsTerrainCfg):
     del rng  # Unused.
     boxes = []
     box_colors = []
+    step_boundaries: list[np.ndarray] = []
 
     body = spec.body("terrain")
 
@@ -297,6 +395,18 @@ class BoxInvertedPyramidStairsTerrainCfg(BoxPyramidStairsTerrainCfg):
       self.size[0] - 2 * self.border_width,
       self.size[1] - 2 * self.border_width,
     )
+    if not self.holes:
+      for boundary_index in range(num_steps + 1):
+        _append_square_step_boundaries(
+          step_boundaries,
+          terrain_center,
+          terrain_size,
+          self.step_width,
+          boundary_index,
+          z_low=-(boundary_index + 1) * step_height,
+          z_high=-boundary_index * step_height,
+          normal_direction="inward",
+        )
 
     rgba = brand_ramp(_MUJOCO_RED, 0.5)
     for k in range(num_steps):
@@ -420,7 +530,14 @@ class BoxInvertedPyramidStairsTerrainCfg(BoxPyramidStairsTerrainCfg):
       TerrainGeometry(geom=box, color=color)
       for box, color in zip(boxes, box_colors, strict=True)
     ]
-    return TerrainOutput(origin=origin, geometries=geometries)
+    boundaries = (
+      np.asarray(step_boundaries, dtype=np.float32)
+      if step_boundaries
+      else None
+    )
+    return TerrainOutput(
+      origin=origin, geometries=geometries, step_boundaries=boundaries
+    )
 
 
 @dataclass(kw_only=True)

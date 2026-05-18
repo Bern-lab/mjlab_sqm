@@ -150,11 +150,23 @@ class TerrainEntity(Entity):
       self._flat_patch_radii: dict[str, float] = dict(
         terrain_generator.flat_patch_radii
       )
+      self._step_boundaries_by_tile = torch.from_numpy(
+        terrain_generator.step_boundaries_by_tile
+      ).to(device=self._device, dtype=torch.float)
+      self._step_boundary_counts = torch.from_numpy(
+        terrain_generator.step_boundary_counts
+      ).to(device=self._device, dtype=torch.long)
     elif self.cfg.terrain_type == "plane":
       self._import_ground_plane("terrain")
       self._configure_env_origins()
       self._flat_patches: dict[str, torch.Tensor] = {}
       self._flat_patch_radii: dict[str, float] = {}
+      self._step_boundaries_by_tile = torch.zeros(
+        (0, 0, 0, 11), device=self._device, dtype=torch.float
+      )
+      self._step_boundary_counts = torch.zeros(
+        (0, 0), device=self._device, dtype=torch.long
+      )
     else:
       raise ValueError(f"Unknown terrain type: {self.cfg.terrain_type}")
 
@@ -174,6 +186,14 @@ class TerrainEntity(Entity):
   @property
   def flat_patch_radii(self) -> dict[str, float]:
     return self._flat_patch_radii
+
+  @property
+  def step_boundaries_by_tile(self) -> torch.Tensor:
+    return self._step_boundaries_by_tile
+
+  @property
+  def step_boundary_counts(self) -> torch.Tensor:
+    return self._step_boundary_counts
 
   # Terrain origin management.
 

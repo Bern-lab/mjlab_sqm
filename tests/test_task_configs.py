@@ -142,3 +142,30 @@ def test_play_mode_disables_push_robot(all_task_ids: list[str]) -> None:
     assert "push_robot" not in cfg.events, (
       f"Play mode task {task_id} has push_robot event, expected it to be removed"
     )
+
+
+def test_step_boundary_rewards_only_on_target_heading_teacher(
+  all_task_ids: list[str],
+) -> None:
+  """Privileged stair geometry rewards should stay scoped to the perceptive teacher."""
+  step_reward_names = {
+    "foot_step_lip_volume_penalty",
+    "toe_step_riser_slab_penalty",
+  }
+  target_task = "Mjlab-Velocity-TargetHeading-Rough-Teacher-Unitree-G1"
+  for task_id in all_task_ids:
+    cfg = load_env_cfg(task_id)
+    present = step_reward_names.intersection(cfg.rewards)
+    if task_id == target_task:
+      assert present == step_reward_names
+      assert cfg.rewards["foot_step_lip_volume_penalty"].params[
+        "min_terrain_level"
+      ] == 3
+      assert cfg.rewards["toe_step_riser_slab_penalty"].params[
+        "min_terrain_level"
+      ] == 3
+      assert cfg.rewards["toe_step_riser_slab_penalty"].params[
+        "slab_depth"
+      ] == 0.04
+    else:
+      assert not present, f"{task_id} unexpectedly enables {sorted(present)}"

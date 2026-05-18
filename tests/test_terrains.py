@@ -3,7 +3,16 @@
 import mujoco
 import numpy as np
 
-from mjlab.terrains.primitive_terrains import BoxSteppingStonesTerrainCfg
+from mjlab.terrains.primitive_terrains import (
+  BoxInvertedPyramidStairsTerrainCfg,
+  BoxPyramidStairsTerrainCfg,
+  BoxSteppingStonesTerrainCfg,
+)
+from mjlab.terrains.terrain_generator import (
+  StepDangerVisualizationCfg,
+  TerrainGenerator,
+  TerrainGeneratorCfg,
+)
 
 _CFG = BoxSteppingStonesTerrainCfg(
   proportion=1.0,
@@ -74,3 +83,94 @@ def test_stone_size_decreases_with_difficulty():
     sizes[difficulty] = np.mean([hx + hy for _, _, hx, hy in stones])
 
   assert sizes[0.0] > sizes[1.0]
+
+
+def test_pyramid_stairs_step_boundaries_use_high_side_lip():
+  cfg = BoxPyramidStairsTerrainCfg(
+    size=(8.0, 8.0),
+    step_height_range=(0.1, 0.1),
+    step_width=0.3,
+    platform_width=3.0,
+    border_width=1.0,
+  )
+  spec = mujoco.MjSpec()
+  spec.worldbody.add_body(name="terrain")
+  output = cfg.function(0.0, spec, np.random.default_rng(0))
+
+  assert output.step_boundaries is not None
+  np.testing.assert_allclose(output.step_boundaries[0, 0:3], [1.0, 7.0, 0.1])
+  np.testing.assert_allclose(output.step_boundaries[0, 3:6], [7.0, 7.0, 0.1])
+  np.testing.assert_allclose(output.step_boundaries[0, 6:9], [0.0, 1.0, 0.0])
+  np.testing.assert_allclose(output.step_boundaries[0, 9:11], [0.0, 0.1])
+
+
+def test_inverted_pyramid_stairs_step_boundaries_point_to_low_side():
+  cfg = BoxInvertedPyramidStairsTerrainCfg(
+    size=(8.0, 8.0),
+    step_height_range=(0.1, 0.1),
+    step_width=0.3,
+    platform_width=3.0,
+    border_width=1.0,
+  )
+  spec = mujoco.MjSpec()
+  spec.worldbody.add_body(name="terrain")
+  output = cfg.function(0.0, spec, np.random.default_rng(0))
+
+  assert output.step_boundaries is not None
+  np.testing.assert_allclose(output.step_boundaries[0, 0:3], [1.0, 7.0, 0.0])
+  np.testing.assert_allclose(output.step_boundaries[0, 3:6], [7.0, 7.0, 0.0])
+  np.testing.assert_allclose(output.step_boundaries[0, 6:9], [0.0, -1.0, 0.0])
+  np.testing.assert_allclose(output.step_boundaries[0, 9:11], [-0.1, 0.0])
+
+
+def test_terrain_generator_pads_step_boundaries_by_tile():
+  cfg = TerrainGeneratorCfg(
+    size=(8.0, 8.0),
+    num_rows=1,
+    num_cols=1,
+    seed=0,
+    sub_terrains={
+      "stairs": BoxPyramidStairsTerrainCfg(
+        step_height_range=(0.1, 0.1),
+        step_width=0.3,
+        platform_width=3.0,
+        border_width=1.0,
+      )
+    },
+  )
+  generator = TerrainGenerator(cfg)
+  spec = mujoco.MjSpec()
+  generator.compile(spec)
+
+  assert generator.step_boundary_counts.shape == (1, 1)
+  assert generator.step_boundary_counts[0, 0] == 24
+  assert generator.step_boundaries_by_tile.shape == (1, 1, 24, 11)
+  np.testing.assert_allclose(
+    generator.step_boundaries_by_tile[0, 0, 0, 0:3], [-3.0, 3.0, 0.1]
+  )
+
+
+def test_step_danger_visualization_adds_non_colliding_geoms():
+  cfg = TerrainGeneratorCfg(
+    size=(8.0, 8.0),
+    num_rows=1,
+    num_cols=1,
+    seed=0,
+    step_danger_visualization=StepDangerVisualizationCfg(enabled=True, geom_group=4),
+    sub_terrains={
+      "stairs": BoxPyramidStairsTerrainCfg(
+        step_height_range=(0.1, 0.1),
+        step_width=0.3,
+        platform_width=3.0,
+        border_width=1.0,
+      )
+    },
+  )
+  generator = TerrainGenerator(cfg)
+  spec = mujoco.MjSpec()
+  generator.compile(spec)
+
+  danger_geoms = [geom for geom in spec.body("terrain").geoms if geom.group == 4]
+  assert len(danger_geoms) == 2 * generator.step_boundary_counts[0, 0]
+  assert all(geom.contype == 0 for geom in danger_geoms)
+  assert all(geom.conaffinity == 0 for geom in danger_geoms)

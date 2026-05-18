@@ -28,9 +28,21 @@ def _colorize_segmentation(seg: np.ndarray) -> np.ndarray:
 
 _GROUND_FOOTPRINT_COLOR = (24, 150, 55)
 _GROUND_FOOTPRINT_OPACITY = 0.52
-_GROUND_FOOTPRINT_Z_OFFSET = 0.015
+_GROUND_FOOTPRINT_MAX_RANGE = 5.0
+_GROUND_FOOTPRINT_SURFACE_OFFSET = 0.002
 _GROUND_FOOTPRINT_MAX_EDGE_LENGTH = 0.35
 _GROUND_PROJECTION_POINT_SIZE = 0.055
+
+
+def _terrain_geom_mask(mj_model: mujoco.MjModel) -> np.ndarray:
+  mask = np.zeros(mj_model.ngeom, dtype=bool)
+  for geom_id in range(mj_model.ngeom):
+    name = mj_model.geom(geom_id).name or ""
+    if name == "terrain" or name.startswith("terrain_"):
+      mask[geom_id] = True
+  if not mask.any():
+    mask = np.asarray(mj_model.geom_group) == 0
+  return mask
 
 
 class ViserCameraViewer:
@@ -57,6 +69,7 @@ class ViserCameraViewer:
 
     self._camera_name = camera_sensor.camera_name
     self._camera_idx = camera_sensor.camera_idx
+    self._terrain_geom_mask = _terrain_geom_mask(mj_model)
 
     self._has_rgb = "rgb" in self._camera_sensor.cfg.data_types
     self._has_depth = "depth" in self._camera_sensor.cfg.data_types
@@ -112,9 +125,9 @@ class ViserCameraViewer:
     self._footprint_range_slider = self._server.gui.add_slider(
       label="Footprint Range",
       min=0.5,
-      max=10.0,
+      max=_GROUND_FOOTPRINT_MAX_RANGE,
       step=0.1,
-      initial_value=3.0,
+      initial_value=_GROUND_FOOTPRINT_MAX_RANGE,
     )
     self._fov, self._aspect = self._compute_camera_fov_aspect()
 
@@ -187,21 +200,27 @@ class ViserCameraViewer:
   def _depth_projection_geometry(
     self,
     depth: np.ndarray,
+    segmentation: np.ndarray | None,
     cam_pos: np.ndarray,
     cam_mat: np.ndarray,
-    render_z: float,
     max_range: float,
   ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Project current depth pixels vertically onto the ground plane."""
+    """Project current depth pixels to their visible surface hit points."""
     height, width = depth.shape
     depth_flat = depth.reshape(-1).astype(np.float64)
+    seg_flat = segmentation.reshape(-1) if segmentation is not None else None
     local_dirs = self._camera_pixel_dirs(height, width)
-    valid = np.isfinite(depth_flat) & (depth_flat > 1.0e-4) & (depth_flat <= max_range)
-
     ray_scale = depth_flat / np.maximum(-local_dirs[:, 2], 1.0e-6)
+    valid = np.isfinite(depth_flat) & (depth_flat > 1.0e-4) & (ray_scale <= max_range)
+    if seg_flat is not None:
+      geom_ids = seg_flat.astype(np.int64)
+      terrain_hit = np.zeros_like(valid, dtype=bool)
+      in_bounds = (geom_ids >= 0) & (geom_ids < self._terrain_geom_mask.shape[0])
+      terrain_hit[in_bounds] = self._terrain_geom_mask[geom_ids[in_bounds]]
+      valid &= terrain_hit
     local_points = local_dirs * ray_scale[:, None]
     projected = (cam_mat @ local_points.T).T + cam_pos
-    projected[:, 2] = render_z
+    projected[:, 2] += _GROUND_FOOTPRINT_SURFACE_OFFSET
     projected = projected.astype(np.float32)
 
     valid_grid = valid.reshape(height, width)
@@ -256,16 +275,19 @@ class ViserCameraViewer:
     cam_id = self._camera_idx
     cam_pos = sim_data.cam_xpos[env_idx, cam_id].cpu().numpy() + scene_offset
     cam_mat = sim_data.cam_xmat[env_idx, cam_id].cpu().numpy().reshape(3, 3)
-    ground_z = float(scene_offset[2])
-    render_z = ground_z + _GROUND_FOOTPRINT_Z_OFFSET
     max_range = max(float(self._footprint_range_slider.value), 0.1)
 
     depth = data.depth[env_idx, :, :, 0].cpu().numpy()
+    segmentation = (
+      data.segmentation[env_idx, :, :, 0].cpu().numpy()
+      if data.segmentation is not None
+      else None
+    )
     vertices, faces, projected_points = self._depth_projection_geometry(
       depth=depth,
+      segmentation=segmentation,
       cam_pos=cam_pos,
       cam_mat=cam_mat,
-      render_z=render_z,
       max_range=max_range,
     )
     if faces.size == 0 or projected_points.size == 0:
