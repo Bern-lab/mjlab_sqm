@@ -75,9 +75,9 @@ class StepDangerVisualizationCfg:
   """Extra half-height along the riser for the slab visual."""
   geom_group: int = 4
   """MuJoCo visualization group for danger-zone geoms."""
-  lip_rgba: RGBA = (1.0, 0.10, 0.05, 0.35)
+  lip_rgba: RGBA = RGBA(1.0, 0.10, 0.05, 0.35)
   """RGBA color for lip edge tubes."""
-  slab_rgba: RGBA = (1.0, 0.75, 0.05, 0.22)
+  slab_rgba: RGBA = RGBA(1.0, 0.75, 0.05, 0.22)
   """RGBA color for riser slabs."""
 
 
