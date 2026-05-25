@@ -52,6 +52,9 @@ class RolloutStorage:
             self.distribution_params: tuple[torch.Tensor, ...] | None = None
             """Parameters of the action distribution (RL only)."""
 
+            self.teacher_distribution_params: tuple[torch.Tensor, ...] | None = None
+            """Frozen-teacher distribution parameters (teacher-KL RL only)."""
+
             # For distillation
             self.privileged_actions: torch.Tensor | None = None
             """Privileged (teacher) actions (distillation only)."""
@@ -80,6 +83,7 @@ class RolloutStorage:
             returns: torch.Tensor | None = None,
             old_actions_log_prob: torch.Tensor | None = None,
             old_distribution_params: tuple[torch.Tensor, ...] | None = None,
+            teacher_distribution_params: tuple[torch.Tensor, ...] | None = None,
             hidden_states: tuple[HiddenState, HiddenState] = (None, None),
             masks: torch.Tensor | None = None,
             privileged_actions: torch.Tensor | None = None,
@@ -107,6 +111,9 @@ class RolloutStorage:
 
             self.old_distribution_params: tuple[torch.Tensor, ...] | None = old_distribution_params
             """Batch of parameters of the old action distribution (RL only)."""
+
+            self.teacher_distribution_params: tuple[torch.Tensor, ...] | None = teacher_distribution_params
+            """Batch of frozen-teacher distribution parameters (teacher-KL RL only)."""
 
             # For distillation
             self.privileged_actions: torch.Tensor | None = privileged_actions
@@ -157,6 +164,7 @@ class RolloutStorage:
             self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.distribution_params: tuple[torch.Tensor, ...] | None = None  # Lazily initialized on first transition
+            self.teacher_distribution_params: tuple[torch.Tensor, ...] | None = None
             self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
 
@@ -188,12 +196,22 @@ class RolloutStorage:
             self.values[self.step].copy_(transition.values)  # type: ignore
             self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
             if self.distribution_params is None:  # Initialize the distribution parameters
-                self.distribution_params = tuple(
-                    torch.zeros(self.num_transitions_per_env, *p.shape, device=self.device)
-                    for p in transition.distribution_params  # type: ignore
-                )
+                with torch.inference_mode(False):
+                    self.distribution_params = tuple(
+                        torch.zeros(self.num_transitions_per_env, *p.shape, device=self.device)
+                        for p in transition.distribution_params  # type: ignore
+                    )
             for i, p in enumerate(transition.distribution_params):  # type: ignore
                 self.distribution_params[i][self.step].copy_(p)
+            if transition.teacher_distribution_params is not None:
+                if self.teacher_distribution_params is None:
+                    with torch.inference_mode(False):
+                        self.teacher_distribution_params = tuple(
+                            torch.zeros(self.num_transitions_per_env, *p.shape, device=self.device)
+                            for p in transition.teacher_distribution_params
+                        )
+                for i, p in enumerate(transition.teacher_distribution_params):
+                    self.teacher_distribution_params[i][self.step].copy_(p)
 
         # For RNN networks
         self._save_hidden_states(transition.hidden_states)
@@ -235,6 +253,11 @@ class RolloutStorage:
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
         old_distribution_params = tuple(p.flatten(0, 1) for p in self.distribution_params)  # type: ignore
+        teacher_distribution_params = (
+            tuple(p.flatten(0, 1) for p in self.teacher_distribution_params)
+            if self.teacher_distribution_params is not None
+            else None
+        )
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -252,6 +275,11 @@ class RolloutStorage:
                     returns=returns[batch_idx],
                     old_actions_log_prob=old_actions_log_prob[batch_idx],
                     old_distribution_params=tuple(p[batch_idx] for p in old_distribution_params),
+                    teacher_distribution_params=(
+                        tuple(p[batch_idx] for p in teacher_distribution_params)
+                        if teacher_distribution_params is not None
+                        else None
+                    ),
                 )
 
     # For reinforcement learning with recurrent networks
@@ -319,6 +347,11 @@ class RolloutStorage:
                     returns=self.returns[:, start:stop],
                     old_actions_log_prob=self.actions_log_prob[:, start:stop],
                     old_distribution_params=tuple(p[:, start:stop] for p in self.distribution_params),  # type: ignore
+                    teacher_distribution_params=(
+                        tuple(p[:, start:stop] for p in self.teacher_distribution_params)
+                        if self.teacher_distribution_params is not None
+                        else None
+                    ),
                     hidden_states=(hidden_state_a_batch, hidden_state_c_batch),  # type: ignore
                     masks=trajectory_masks[:, first_traj:last_traj],
                 )

@@ -141,6 +141,8 @@ class RewardManager(ManagerBase):
     for term_cfg in self._class_term_cfgs:
       if not hasattr(term_cfg.func, "debug_vis"):
         continue
+      if not getattr(term_cfg.func, "_debug_vis_available", True):
+        continue
       name = next(
         n
         for n, c in zip(self._term_names, self._term_cfgs, strict=False)

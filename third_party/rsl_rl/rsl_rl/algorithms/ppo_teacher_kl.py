@@ -205,6 +205,30 @@ class PPOTeacherKL(PPO):
             value /= self.gpu_world_size
         return value
 
+    def act(self, obs: TensorDict) -> torch.Tensor:
+        """Sample student actions and store frozen-teacher distribution params.
+
+        The teacher may use large privileged observations such as depth images.
+        We compute its distribution once during rollout and store only the compact
+        distribution parameters, so recurrent student updates do not keep
+        teacher-only camera frames in rollout storage or rerun the teacher CNN
+        for every PPO epoch.
+        """
+        actions = super().act(obs)
+
+        if self.teacher is None or not self.teacher_loaded:
+            raise RuntimeError("Teacher KL rollout requires a loaded teacher model.")
+
+        with torch.no_grad():
+            self.teacher(obs, stochastic_output=True)
+            self.transition.teacher_distribution_params = tuple(
+                p.detach() for p in self.teacher.output_distribution_params
+            )
+
+        storage_obs_groups = list(self.storage.observations.keys())
+        self.transition.observations = obs.select(*storage_obs_groups)
+        return actions
+
     def _compute_additional_loss(
         self,
         batch: RolloutStorage.Batch,
@@ -227,12 +251,18 @@ class PPOTeacherKL(PPO):
             }
 
         observations = batch.observations
-        teacher_observations = observations[:original_batch_size]
-        teacher_masks = batch.masks[:original_batch_size] if batch.masks is not None else None
+        if batch.teacher_distribution_params is not None:
+            # Rollout collection runs under torch.inference_mode(), and these
+            # cached teacher params are used in an autograd-tracked KL loss.
+            # Clone them during update so autograd can save the constants.
+            teacher_distribution_params = tuple(p.detach().clone() for p in batch.teacher_distribution_params)
+        else:
+            teacher_observations = observations[:original_batch_size]
+            teacher_masks = batch.masks[:original_batch_size] if batch.masks is not None else None
 
-        with torch.no_grad():
-            self.teacher(teacher_observations, masks=teacher_masks, stochastic_output=True)
-            teacher_distribution_params = tuple(p.detach() for p in self.teacher.output_distribution_params)
+            with torch.no_grad():
+                self.teacher(teacher_observations, masks=teacher_masks, stochastic_output=True)
+                teacher_distribution_params = tuple(p.detach() for p in self.teacher.output_distribution_params)
 
         student_distribution_params = distribution_params
         if teacher_kl_lambda == 0.0:
@@ -285,8 +315,29 @@ class PPOTeacherKL(PPO):
     def load(self, loaded_dict: dict, load_cfg: dict | None, strict: bool) -> bool:
         """Load models and restore the teacher-KL schedule state."""
         load_iteration = super().load(loaded_dict, load_cfg, strict)
-        if load_iteration and "teacher_kl_iteration" in loaded_dict:
-            self.teacher_kl_iteration = int(loaded_dict["teacher_kl_iteration"])
+        if load_iteration:
+            load_teacher_kl_cfg = load_cfg is None or load_cfg.get("teacher_kl_cfg", True)
+            load_teacher_kl_iteration = load_cfg is None or load_cfg.get("teacher_kl_iteration", True)
+            loaded_teacher_kl_cfg = loaded_dict.get("teacher_kl_cfg")
+            if load_teacher_kl_cfg and isinstance(loaded_teacher_kl_cfg, dict):
+                self.teacher_kl_cfg.update(loaded_teacher_kl_cfg)
+                self.set_teacher_checkpoint(
+                    loaded_teacher_kl_cfg.get(
+                        "checkpoint_path", loaded_dict.get("teacher_checkpoint_path", self.teacher_checkpoint_path)
+                    )
+                )
+                self.set_teacher_kl_schedule(
+                    lambda_start=self.teacher_kl_cfg.get("lambda_start"),
+                    lambda_end=self.teacher_kl_cfg.get("lambda_end"),
+                    warmup_iters=self.teacher_kl_cfg.get("warmup_iters"),
+                    constant_iters=self.teacher_kl_cfg.get("constant_iters"),
+                    anneal_iters=self.teacher_kl_cfg.get("anneal_iters"),
+                    schedule=self.teacher_kl_cfg.get("schedule"),
+                )
+            elif load_teacher_kl_cfg and "teacher_checkpoint_path" in loaded_dict:
+                self.set_teacher_checkpoint(loaded_dict["teacher_checkpoint_path"])
+            if load_teacher_kl_iteration and "teacher_kl_iteration" in loaded_dict:
+                self.teacher_kl_iteration = int(loaded_dict["teacher_kl_iteration"])
         return load_iteration
 
     def train_mode(self) -> None:
@@ -339,8 +390,14 @@ class PPOTeacherKL(PPO):
             raise ValueError("PPOTeacherKL currently supports feedforward teacher actors only.")
         print(f"Teacher Model: {teacher}")
 
-        # Initialize the storage
-        storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
+        # Initialize storage only with groups needed by learnable models. Frozen-teacher-only
+        # observations (e.g. depth camera frames) are consumed during rollout and replaced by
+        # compact teacher distribution parameters.
+        storage_obs_groups = set()
+        for obs_set in ("actor", "critic", "rnd_state"):
+            storage_obs_groups.update(obs_groups.get(obs_set, []))
+        storage_obs = obs.select(*storage_obs_groups)
+        storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], storage_obs, [env.num_actions], device)
 
         # Initialize the algorithm. The teacher is intentionally assigned after construction so it is not part of the
         # PPO optimizer created by the parent class.

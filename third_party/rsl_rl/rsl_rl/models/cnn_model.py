@@ -110,8 +110,20 @@ class CNNModel(MLPModel):
         """Build the model latent by combining normalized 1D and CNN-encoded 2D observation groups."""
         # Concatenate 1D observation groups and normalize
         latent_1d = super().get_latent(obs)
-        # Process 2D observation groups with CNNs
-        latent_cnn_list = [self.cnns[obs_group](obs[obs_group]) for obs_group in self.obs_groups_2d]
+        # Process 2D observation groups with CNNs. Recurrent training batches may
+        # carry leading [time, trajectory] dimensions; flatten them for conv2d
+        # and restore the prefix afterwards.
+        latent_cnn_list = []
+        for obs_group in self.obs_groups_2d:
+            obs_group_tensor = obs[obs_group]
+            if obs_group_tensor.dim() > 4:
+                leading_shape = obs_group_tensor.shape[:-3]
+                cnn_input = obs_group_tensor.reshape(-1, *obs_group_tensor.shape[-3:])
+                cnn_latent = self.cnns[obs_group](cnn_input)
+                cnn_latent = cnn_latent.reshape(*leading_shape, -1)
+            else:
+                cnn_latent = self.cnns[obs_group](obs_group_tensor)
+            latent_cnn_list.append(cnn_latent)
         latent_cnn = torch.cat(latent_cnn_list, dim=-1)
         # Concatenate 1D and CNN latents
         return torch.cat([latent_1d, latent_cnn], dim=-1)

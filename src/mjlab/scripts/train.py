@@ -39,6 +39,10 @@ class TrainConfig:
   enable_nan_guard: bool = False
   resume_new_run: bool = False
   """When resuming, load the checkpoint but write logs to a fresh run directory."""
+  resume_use_current_teacher_kl_cfg: bool = False
+  """When resuming PPOTeacherKL, use the current config's teacher-KL schedule instead of the checkpoint's."""
+  resume_reset_teacher_kl_iteration: bool = False
+  """When resuming PPOTeacherKL, restart the teacher-KL schedule clock from zero."""
   torchrunx_log_dir: str | None = None
   wandb_run_path: str | None = None
   wandb_checkpoint_name: str | None = None
@@ -177,7 +181,18 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   runner.add_git_repo_to_log(__file__)
   if resume_path is not None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    runner.load(str(resume_path))
+    load_cfg = None
+    if cfg.resume_use_current_teacher_kl_cfg or cfg.resume_reset_teacher_kl_iteration:
+      load_cfg = {
+        "actor": True,
+        "critic": True,
+        "optimizer": True,
+        "iteration": True,
+        "rnd": True,
+        "teacher_kl_cfg": not cfg.resume_use_current_teacher_kl_cfg,
+        "teacher_kl_iteration": not cfg.resume_reset_teacher_kl_iteration,
+      }
+    runner.load(str(resume_path), load_cfg=load_cfg)
 
   runner.learn(
     num_learning_iterations=cfg.agent.max_iterations, init_at_random_ep_len=True

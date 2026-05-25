@@ -106,6 +106,8 @@ class OnPolicyRunner:
 
             # Update policy
             loss_dict = self.alg.update()
+            if str(self.device).startswith("cuda"):
+                torch.cuda.empty_cache()
 
             stop = time.time()
             learn_time = stop - start

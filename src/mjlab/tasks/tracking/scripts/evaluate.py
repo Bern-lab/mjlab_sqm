@@ -24,6 +24,7 @@ from mjlab.tasks.tracking.mdp.metrics import (
   compute_mpkpe,
   compute_root_relative_mpkpe,
 )
+from mjlab.utils.lstm import reset_policy_state, reset_policy_state_from_step
 from mjlab.utils.os import get_task_log_root, get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 
@@ -84,6 +85,7 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
   runner = runner_cls(env, asdict(agent_cfg), device=device)
   runner.load(str(resume_path), map_location=device)
   policy = runner.get_inference_policy(device=device)
+  reset_policy_state(policy)
 
   command = cast(MotionCommand, env.unwrapped.command_manager.get_term("motion"))
   ee_body_names = env_cfg.terminations["ee_body_pos"].params["body_names"]
@@ -108,7 +110,9 @@ def run_evaluate(task_id: str, cfg: EvaluateConfig) -> dict[str, float]:
   while not done_envs.all():
     with torch.no_grad():
       actions = policy(obs)
-    obs, _, dones, _ = env.step(actions)
+    step_result = env.step(actions)
+    reset_policy_state_from_step(policy, step_result)
+    obs, _, dones, _ = step_result
 
     # Compute metrics for active envs.
     active = ~done_envs

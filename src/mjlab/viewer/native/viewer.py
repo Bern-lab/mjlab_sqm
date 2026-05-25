@@ -134,6 +134,7 @@ class NativeMujocoViewer(BaseViewer):
   _DEPTH_CAMERA_POINT_RADIUS = 0.005
   _DEPTH_CAMERA_SURFACE_Z_OFFSET = 0.002
   _DEPTH_CAMERA_FRUSTUM_LENGTH = 0.75
+  _SHOW_DEPTH_CAMERA_GROUND_PROJECTION = False
 
   def __init__(
     self,
@@ -334,18 +335,19 @@ class NativeMujocoViewer(BaseViewer):
       cam_pos = sim_data.cam_xpos[self.env_idx, cam_id].cpu().numpy()
       cam_mat = sim_data.cam_xmat[self.env_idx, cam_id].cpu().numpy().reshape(3, 3)
       self._draw_depth_camera_frustum(visualizer, sensor, cam_pos, cam_mat)
-      self._draw_depth_camera_ground_projection(
-        visualizer=visualizer,
-        sensor=sensor,
-        depth=depth[self.env_idx, :, :, 0].cpu().numpy(),
-        segmentation=(
-          segmentation[self.env_idx, :, :, 0].cpu().numpy()
-          if segmentation is not None
-          else None
-        ),
-        cam_pos=cam_pos,
-        cam_mat=cam_mat,
-      )
+      if self._SHOW_DEPTH_CAMERA_GROUND_PROJECTION:
+        self._draw_depth_camera_ground_projection(
+          visualizer=visualizer,
+          sensor=sensor,
+          depth=depth[self.env_idx, :, :, 0].cpu().numpy(),
+          segmentation=(
+            segmentation[self.env_idx, :, :, 0].cpu().numpy()
+            if segmentation is not None
+            else None
+          ),
+          cam_pos=cam_pos,
+          cam_mat=cam_mat,
+        )
 
   def _draw_depth_camera_frustum(
     self,

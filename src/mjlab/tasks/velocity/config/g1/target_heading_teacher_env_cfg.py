@@ -40,6 +40,7 @@ from mjlab.terrains.primitive_terrains import (
   BoxInvertedPyramidStairsTerrainCfg,
   BoxPyramidStairsTerrainCfg,
 )
+from mjlab.utils.color import RGBA
 
 
 def _apply_teacher_actor(cfg: ManagerBasedRlEnvCfg) -> None:
@@ -88,6 +89,10 @@ def _target_heading_play_terrain_cfg() -> TerrainGeneratorCfg:
   terrain_cfg.num_rows = 5
   terrain_cfg.num_cols = 5
   terrain_cfg.border_width = 10.0
+  terrain_cfg.step_danger_visualization.enabled = True
+  terrain_cfg.step_danger_visualization.geom_group = 2
+  terrain_cfg.step_danger_visualization.lip_rgba = RGBA(1.0, 0.72, 0.12, 0.30)
+  terrain_cfg.step_danger_visualization.slab_rgba = RGBA(1.0, 0.72, 0.12, 0.30)
 
   for terrain_name in ("high_stairs", "high_stairs_inv"):
     sub_terrain = terrain_cfg.sub_terrains[terrain_name]
@@ -128,7 +133,8 @@ def unitree_g1_target_heading_teacher_env_cfg(
   cfg.sim.mujoco.ccd_iterations = 50
   cfg.sim.contact_sensor_maxmatch = 400
   cfg.sim.nconmax = 256
-  cfg.sim.nccdmax = 64
+  cfg.sim.nccdmax = None
+  cfg.sim.njmax = 4096
   cfg.sim.use_cuda_graph = True
 
   robot_cfg = get_g1_robot_cfg()
@@ -149,23 +155,6 @@ def unitree_g1_target_heading_teacher_env_cfg(
     ),
   )
   cfg.scene.entities = {"robot": robot_cfg}
-
-  actor_terms = cfg.observations["actor"].terms
-  for term_name in (
-    "base_ang_vel",
-    "projected_gravity",
-    "joint_pos_rel",
-    "joint_vel_rel",
-    "base_lin_vel",
-    "height_scan",
-    "foot_height",
-  ):
-    term = deepcopy(actor_terms[term_name])
-    assert isinstance(term, ObservationTermCfg)
-    term.delay_min_lag = actor_obs_delay_min_lag
-    term.delay_max_lag = actor_obs_delay_max_lag
-    term.delay_hold_prob = actor_obs_delay_hold_prob
-    actor_terms[term_name] = term
 
   for sensor in cfg.scene.sensors or ():
     if sensor.name == "terrain_scan":
@@ -214,8 +203,8 @@ def unitree_g1_target_heading_teacher_env_cfg(
     pos=(0.10, 0.0, 0.45),
     quat=(0.95371695, 0.0, -0.30070580, 0.0),
     fovy=80.0,  # 垂直仰角
-    width=48,
-    height=48,
+    width=64,
+    height=64,
     data_types=("depth",),
     enabled_geom_groups=(0, 2, 3),
     use_shadows=False,
@@ -226,6 +215,25 @@ def unitree_g1_target_heading_teacher_env_cfg(
     self_collision_cfg,
     front_camera_cfg,
   )
+
+  # Observation setup: actor/critic terms, depth camera, and per-term history.
+  actor_terms = cfg.observations["actor"].terms
+  for term_name in (
+    "base_ang_vel",
+    "projected_gravity",
+    "joint_pos_rel",
+    "joint_vel_rel",
+    "base_lin_vel",
+    "height_scan",
+    "foot_height",
+  ):
+    term = deepcopy(actor_terms[term_name])
+    assert isinstance(term, ObservationTermCfg)
+    term.delay_min_lag = actor_obs_delay_min_lag
+    term.delay_max_lag = actor_obs_delay_max_lag
+    term.delay_hold_prob = actor_obs_delay_hold_prob
+    actor_terms[term_name] = term
+
   cfg.observations["camera"] = ObservationGroupCfg(  # 相机观测
     terms={
       "front_depth": ObservationTermCfg(
@@ -238,6 +246,47 @@ def unitree_g1_target_heading_teacher_env_cfg(
     concatenate_dim=0,
   )
   _disable_observation_noise_and_delay(cfg)
+  if play:
+    cfg.observations["actor"].enable_corruption = False
+
+  history_terms = (
+    "base_ang_vel",
+    "projected_gravity",
+    "joint_pos_rel",
+    "joint_vel_rel",
+    "last_action",
+  )
+  actor_current_terms = (
+    "velocity_commands",
+    "gait_phase",
+    "height_scan",
+    "base_lin_vel",
+    "foot_height",
+  )
+  critic_current_terms = actor_current_terms + (
+    "foot_air_time",
+    "foot_contact",
+    "foot_contact_forces",
+  )
+
+  cfg.observations["actor"].history_length = None
+  cfg.observations["critic"].history_length = None
+
+  for group_name, current_terms in (
+    ("actor", actor_current_terms),
+    ("critic", critic_current_terms),
+  ):
+    terms = cfg.observations[group_name].terms
+    for term_name in history_terms:
+      term = deepcopy(terms[term_name])
+      assert isinstance(term, ObservationTermCfg)
+      term.history_length = blind_obs_history_length
+      terms[term_name] = term
+    for term_name in current_terms:
+      term = deepcopy(terms[term_name])
+      assert isinstance(term, ObservationTermCfg)
+      term.history_length = current_obs_history_length
+      terms[term_name] = term
 
   if cfg.scene.terrain is not None:
     cfg.scene.terrain.terrain_generator = (
@@ -265,16 +314,10 @@ def unitree_g1_target_heading_teacher_env_cfg(
     },
     {
       "step": 3000 * 24,
-      "lin_vel_x": (-0.7, 1.0),
-      "lin_vel_y": (0.0, 0.0),
-      "ang_vel_z": (-0.6, 0.6),
-    },
-    {
-      "step": 10000 * 24,
       "lin_vel_x": (0.0, 1.2),
       "lin_vel_y": (0.0, 0.0),
       "ang_vel_z": (-0.8, 0.8),
-    },
+    },#和teacherkl保持一致
   ]
 
   if "command_vel" in cfg.curriculum:
@@ -351,7 +394,6 @@ def unitree_g1_target_heading_teacher_env_cfg(
 
   if play:
     cfg.episode_length_s = int(1e9)
-    cfg.observations["actor"].enable_corruption = False
     cfg.events.pop("push_robot", None)
     cfg.terminations.pop("out_of_terrain_bounds", None)
     cfg.curriculum = {}
@@ -366,45 +408,6 @@ def unitree_g1_target_heading_teacher_env_cfg(
       cfg.scene.terrain.terrain_generator.num_cols = 5
       cfg.scene.terrain.terrain_generator.num_rows = 5
       cfg.scene.terrain.terrain_generator.border_width = 10.0
-
-  history_terms = (
-    "base_ang_vel",
-    "projected_gravity",
-    "joint_pos_rel",
-    "joint_vel_rel",
-    "last_action",
-  )
-  actor_current_terms = (
-    "velocity_commands",
-    "gait_phase",
-    "height_scan",
-    "base_lin_vel",
-    "foot_height",
-  )
-  critic_current_terms = actor_current_terms + (
-    "foot_air_time",
-    "foot_contact",
-    "foot_contact_forces",
-  )
-
-  cfg.observations["actor"].history_length = None
-  cfg.observations["critic"].history_length = None
-
-  for group_name, current_terms in (
-    ("actor", actor_current_terms),
-    ("critic", critic_current_terms),
-  ):
-    terms = cfg.observations[group_name].terms
-    for term_name in history_terms:
-      term = deepcopy(terms[term_name])
-      assert isinstance(term, ObservationTermCfg)
-      term.history_length = blind_obs_history_length
-      terms[term_name] = term
-    for term_name in current_terms:
-      term = deepcopy(terms[term_name])
-      assert isinstance(term, ObservationTermCfg)
-      term.history_length = current_obs_history_length
-      terms[term_name] = term
 
   assert cfg.scene.terrain is not None
   assert cfg.scene.terrain.terrain_generator is not None
@@ -429,9 +432,9 @@ def unitree_g1_target_heading_teacher_env_cfg(
     zero_lateral_velocity=True,
     debug_vis=True,
     ranges=TeacherTargetHeadingVelocityCommandCfg.Ranges(
-      lin_vel_x=(-0.5, 0.8),
+      lin_vel_x=(0.0, 1.2),
       lin_vel_y=(0.0, 0.0),
-      ang_vel_z=(-0.5, 0.5),
+      ang_vel_z=(-0.8, 0.8),
       heading=(-math.pi, math.pi),
     ),
   )
@@ -440,7 +443,7 @@ def unitree_g1_target_heading_teacher_env_cfg(
     twist_cmd.rel_random_heading_envs = 0.0
     twist_cmd.rel_standing_envs = 0.0
     twist_cmd.heading_control_stiffness = 0.8
-    twist_cmd.ranges.lin_vel_x = (0.3, 0.9)
+    twist_cmd.ranges.lin_vel_x = (0.3, 1.0)
     twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
     twist_cmd.ranges.ang_vel_z = (-0.7, 0.7)
     twist_cmd.target_min_distance = 1.0
@@ -461,10 +464,34 @@ def unitree_g1_target_heading_teacher_env_cfg(
   )
   cfg.rewards["foot_step_lip_volume_penalty"] = RewardTermCfg(
     func=mdp.foot_step_lip_volume_penalty,
-    weight=-4.0,
+    weight=-3.2,
     params={
-      "edge_radius": 0.05,
+      "edge_radius": 0.07,
       "edge_height_band": 0.06,
+      "support_speed_floor": 0.08,
+      "nearest_boundaries": 4,
+      "contact_sensor_name": "feet_ground_contact",
+      "min_terrain_level": 3,
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+      ),
+      "debug_vis_foot_points": play,
+      "debug_vis_foot_point_radius": 0.008,
+      "debug_vis_foot_point_color": (0.0, 1.0, 0.15, 0.9),
+    },
+  )
+  cfg.rewards["toe_step_riser_slab_penalty"] = RewardTermCfg(
+    func=mdp.toe_step_riser_slab_penalty,
+    weight=-4.2,
+    params={
+      "slab_depth": 0.1,
+      "u_margin": 0.02,
+      "v_margin": 0.05,
+      "toe_x_min": 0.08,
+      "toe_v_threshold": 0.02,
+      "approach_speed_floor": 0.08,
+      "surface_tol": 0.005,
       "nearest_boundaries": 4,
       "min_terrain_level": 3,
       "asset_cfg": SceneEntityCfg(
@@ -473,22 +500,65 @@ def unitree_g1_target_heading_teacher_env_cfg(
       ),
     },
   )
-  cfg.rewards["toe_step_riser_slab_penalty"] = RewardTermCfg(
-    func=mdp.toe_step_riser_slab_penalty,
-    weight=-0.8,
+  cfg.rewards["heel_step_riser_clearance_penalty"] = RewardTermCfg(
+    func=mdp.heel_step_riser_clearance_penalty,
+    weight=-3.5,
     params={
-      "slab_depth": 0.04,
-      "u_margin": 0.02,
-      "v_margin": 0.02,
-      "toe_x_min": 0.09,
-      "toe_v_threshold": 0.05,
+      "heel_clearance": 0.10,
+      "u_margin": 0.04,
+      "v_margin": 0.06,
+      "heel_x_max": 0.0,
       "surface_tol": 0.005,
       "nearest_boundaries": 4,
+      "contact_sensor_name": "feet_ground_contact",
       "min_terrain_level": 3,
       "asset_cfg": SceneEntityCfg(
         "robot",
         body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
       ),
+    },
+  )
+  cfg.rewards["foot_landing_flatness_penalty"] = RewardTermCfg(
+    func=mdp.foot_landing_flatness_penalty,
+    weight=-2.0,
+    params={
+      "near_height": 0.15,
+      "max_tilt_deg": 12.0,
+      "max_upward_speed": 0.10,
+      "height_sensor_name": "foot_height_scan",
+      "contact_sensor_name": "feet_ground_contact",
+      "min_terrain_level": 3,
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+      ),
+    },
+  )
+  cfg.rewards["shank_step_lip_proximity_penalty"] = RewardTermCfg(
+    func=mdp.shank_step_lip_proximity_penalty,
+    weight=-1.2,
+    params={
+      "clearance_radius": 0.20,
+      "collision_radius": 0.05,
+      "collision_weight": 4.0,
+      "height_history_len": 6,
+      "height_gain_threshold": 0.03,
+      "ascent_hold_steps": 4,
+      "shank_tilt_threshold_deg": 15.0,
+      "nearest_boundaries": 4,
+      "min_terrain_level": 3,
+      "shank_ref_local": (0.045, 0.0, -0.165),
+      "shank_x_range": (0.045, 0.045),
+      "shank_y_range": (-0.035, 0.035),
+      "shank_z_range": (-0.23, -0.10),
+      "shank_grid_shape": (1, 3, 5),
+      "asset_cfg": SceneEntityCfg(
+        "robot",
+        body_names=("left_knee_link", "right_knee_link"),
+      ),
+      "debug_vis_shank_points": play,
+      "debug_vis_shank_point_radius": 0.012,
+      "debug_vis_shank_point_color": (0.1, 0.8, 1.0, 0.9),
     },
   )
 

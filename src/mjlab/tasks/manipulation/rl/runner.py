@@ -6,6 +6,7 @@ from mjlab.rl.exporter_utils import (
   get_base_metadata,
 )
 from mjlab.rl.runner import MjlabOnPolicyRunner
+from mjlab.utils.lstm import get_recurrent_policy_metadata
 
 
 class ManipulationOnPolicyRunner(MjlabOnPolicyRunner):
@@ -20,6 +21,7 @@ class ManipulationOnPolicyRunner(MjlabOnPolicyRunner):
         wandb.run.name if self.logger.logger_type == "wandb" and wandb.run else "local"
       )  # type: ignore[assignment]
       metadata = get_base_metadata(self.env.unwrapped, run_name)
+      metadata.update(get_recurrent_policy_metadata(self.alg.get_policy()))
       attach_metadata_to_onnx(str(onnx_path), metadata)
       if self.logger.logger_type in ["wandb"] and self.cfg["upload_model"]:
         wandb.save(

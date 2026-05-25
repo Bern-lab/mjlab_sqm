@@ -125,7 +125,7 @@ class MjlabViserScene(ViserMujocoScene, DebugVisualizer):
   ) -> None:
     super().__init__(server, mj_model, num_envs)
 
-    self.debug_visualization_enabled = False
+    self.debug_visualization_enabled = True
     self.show_all_envs = False
 
     # Queued debug primitives (populated each frame, consumed by sync).
