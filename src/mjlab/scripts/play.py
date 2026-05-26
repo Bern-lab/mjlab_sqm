@@ -15,6 +15,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
+from mjlab.utils.lstm import reset_policy_state
 from mjlab.utils.os import get_task_log_root, get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
@@ -222,6 +223,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
     policy = runner.get_inference_policy(device=device)
+    reset_policy_state(policy)
 
   # Build checkpoint manager for hot-swapping checkpoints in the viewer.
   ckpt_manager: CheckpointManager | None = None
@@ -235,7 +237,9 @@ def run_play(task_id: str, cfg: PlayConfig):
         strict=True,
         map_location=device,
       )
-      return _ckpt_runner.get_inference_policy(device=device)
+      policy = _ckpt_runner.get_inference_policy(device=device)
+      reset_policy_state(policy)
+      return policy
 
     if cfg.wandb_run_path is None:
       ckpt_dir = resume_path.parent

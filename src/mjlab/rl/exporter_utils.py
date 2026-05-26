@@ -73,10 +73,16 @@ def attach_metadata_to_onnx(
   """
   model = onnx.load(onnx_path)
 
+  existing = {entry.key: entry for entry in model.metadata_props}
   for k, v in metadata.items():
-    entry = onnx.StringStringEntryProto()
-    entry.key = k
-    entry.value = list_to_csv_str(v) if isinstance(v, list) else str(v)
-    model.metadata_props.append(entry)
+    value = list_to_csv_str(v) if isinstance(v, list) else str(v)
+    entry = existing.get(k)
+    if entry is None:
+      entry = onnx.StringStringEntryProto()
+      entry.key = k
+      entry.value = value
+      model.metadata_props.append(entry)
+    else:
+      entry.value = value
 
   onnx.save(model, onnx_path)

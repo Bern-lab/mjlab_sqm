@@ -13,6 +13,7 @@ from mjlab.rl.exporter_utils import (
 )
 from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab.tasks.tracking.mdp import MotionCommand
+from mjlab.utils.lstm import get_recurrent_policy_metadata
 
 
 class _OnnxMotionModel(nn.Module):
@@ -21,6 +22,8 @@ class _OnnxMotionModel(nn.Module):
   def __init__(self, actor, motion):
     super().__init__()
     self.policy = actor.as_onnx(verbose=False)
+    self.policy_is_recurrent = bool(getattr(self.policy, "is_recurrent", False))
+    self.policy_rnn_type = str(getattr(self.policy, "rnn_type", "")).lower()
     self.register_buffer("joint_pos", motion.joint_pos.to("cpu"))
     self.register_buffer("joint_vel", motion.joint_vel.to("cpu"))
     self.register_buffer("body_pos_w", motion.body_pos_w.to("cpu"))
@@ -29,12 +32,21 @@ class _OnnxMotionModel(nn.Module):
     self.register_buffer("body_ang_vel_w", motion.body_ang_vel_w.to("cpu"))
     self.time_step_total: int = self.joint_pos.shape[0]  # type: ignore[index]
 
-  def forward(self, x, time_step):
+  def forward(self, x, time_step, h_in=None, c_in=None):
     time_step_clamped = torch.clamp(
       time_step.long().squeeze(-1), max=self.time_step_total - 1
     )
+    if self.policy_is_recurrent:
+      if self.policy_rnn_type == "lstm":
+        actions, h_out, c_out = self.policy(x, h_in, c_in)
+        policy_outputs = (actions, h_out, c_out)
+      else:
+        actions, h_out = self.policy(x, h_in)
+        policy_outputs = (actions, h_out)
+    else:
+      policy_outputs = (self.policy(x),)
     return (
-      self.policy(x),
+      *policy_outputs,
       self.joint_pos[time_step_clamped],  # type: ignore[index]
       self.joint_vel[time_step_clamped],  # type: ignore[index]
       self.body_pos_w[time_step_clamped],  # type: ignore[index]
@@ -86,23 +98,39 @@ class MotionTrackingOnPolicyRunner(MjlabOnPolicyRunner):
     model.eval()
     obs = torch.zeros(1, model.policy.input_size)
     time_step = torch.zeros(1, 1)
-    torch.onnx.export(
-      model,
-      (obs, time_step),
-      os.path.join(path, filename),
-      export_params=True,
-      opset_version=18,
-      verbose=verbose,
-      input_names=["obs", "time_step"],
-      output_names=[
-        "actions",
+    dummy_inputs: tuple[torch.Tensor, ...] = (obs, time_step)
+    input_names = ["obs", "time_step"]
+    output_names = ["actions"]
+    if model.policy_is_recurrent:
+      h_in = torch.zeros(model.policy.num_layers, 1, model.policy.hidden_size)
+      input_names.append("h_in")
+      if model.policy_rnn_type == "lstm":
+        c_in = torch.zeros(model.policy.num_layers, 1, model.policy.hidden_size)
+        dummy_inputs = (obs, time_step, h_in, c_in)
+        input_names.append("c_in")
+        output_names.extend(["h_out", "c_out"])
+      else:
+        dummy_inputs = (obs, time_step, h_in)
+        output_names.append("h_out")
+    output_names.extend(
+      [
         "joint_pos",
         "joint_vel",
         "body_pos_w",
         "body_quat_w",
         "body_lin_vel_w",
         "body_ang_vel_w",
-      ],
+      ]
+    )
+    torch.onnx.export(
+      model,
+      dummy_inputs,
+      os.path.join(path, filename),
+      export_params=True,
+      opset_version=18,
+      verbose=verbose,
+      input_names=input_names,
+      output_names=output_names,
       dynamic_axes={},
       dynamo=False,
     )
@@ -117,6 +145,7 @@ class MotionTrackingOnPolicyRunner(MjlabOnPolicyRunner):
         wandb.run.name if self.logger.logger_type == "wandb" and wandb.run else "local"
       )  # type: ignore[assignment]
       metadata = get_base_metadata(self.env.unwrapped, run_name)
+      metadata.update(get_recurrent_policy_metadata(self.alg.get_policy()))
       motion_term = cast(
         MotionCommand, self.env.unwrapped.command_manager.get_term("motion")
       )
@@ -127,6 +156,7 @@ class MotionTrackingOnPolicyRunner(MjlabOnPolicyRunner):
         }
       )
       attach_metadata_to_onnx(str(onnx_path), metadata)
+      attach_metadata_to_onnx(str(policy_dir / "policy.onnx"), metadata)
       if self.logger.logger_type in ["wandb"] and self.cfg["upload_model"]:
         wandb.save(str(onnx_path), base_path=str(policy_dir))
         if self.registry_name is not None:

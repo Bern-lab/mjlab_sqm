@@ -80,6 +80,8 @@ from typing import TYPE_CHECKING, Any, Optional, Protocol
 
 import torch
 
+from mjlab.utils.lstm import reset_policy_state, reset_policy_state_from_step
+
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnvCfg
 
@@ -288,7 +290,8 @@ class BaseViewer(ABC):
       with torch.no_grad():
         obs = self.env.get_observations()
         actions = self.policy(obs)
-        self.env.step(actions)
+        step_result = self.env.step(actions)
+        reset_policy_state_from_step(self.policy, step_result)
         self._step_count += 1
         self._stats_steps += 1
         return True
@@ -338,9 +341,7 @@ class BaseViewer(ABC):
 
   def reset_environment(self) -> None:
     self.env.reset()
-    reset_fn = getattr(self.policy, "reset", None)
-    if reset_fn is not None:
-      reset_fn()
+    reset_policy_state(self.policy)
     self._step_count = 0
     self._sim_budget = 0.0
     self._last_error = None
