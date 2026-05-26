@@ -145,3 +145,12 @@ def unitree_g1_blind_rough_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerCfg:
     num_steps_per_env=24,
     max_iterations=40_001,
   )
+
+
+def unitree_g1_blind_rough_target_navigation_teacherkl_runner_cfg() -> (
+  RslRlTeacherKLRunnerCfg
+):
+  """Create Teacher-KL config for blind rough target-navigation training."""
+  cfg = unitree_g1_blind_rough_teacherkl_runner_cfg()
+  cfg.experiment_name = "g1_blind_rough_target_navigation_teacherkl"
+  return cfg

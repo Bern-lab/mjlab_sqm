@@ -1,11 +1,22 @@
 """Teacher-KL Unitree G1 blind-rough velocity environment configuration."""
 
+import math
 from copy import deepcopy
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.velocity import mdp
+from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
+  TeacherTargetHeadingVelocityCommandCfg,
+)
+from mjlab.tasks.velocity.mdp.teacher_target_heading_rewards import (
+  teacher_target_progress,
+  teacher_target_reached_bonus,
+)
+from mjlab.terrains import FlatPatchSamplingCfg, TerrainGeneratorCfg
 from mjlab.terrains.config import BLIND_HIGH_STAIRS_TERRAINS_CFG
 from mjlab.terrains.primitive_terrains import (
   BoxInvertedPyramidStairsTerrainCfg,
@@ -30,6 +41,67 @@ TEACHER_OBSERVATION_ORDER = (
   "base_lin_vel",
   "foot_height",
 )
+
+_TOE_TERRAIN_CONTACT_SENSOR = "toe_terrain_contact"
+_G1_FOOT_BODY_NAMES = ("left_ankle_roll_link", "right_ankle_roll_link")
+
+
+def _g1_foot_body_cfg() -> SceneEntityCfg:
+  return SceneEntityCfg(
+    "robot",
+    body_names=_G1_FOOT_BODY_NAMES,
+    preserve_order=True,
+  )
+
+
+def _add_toe_terrain_contact_sensor(cfg: ManagerBasedRlEnvCfg) -> None:
+  sensor_names = {sensor.name for sensor in cfg.scene.sensors or ()}
+  if _TOE_TERRAIN_CONTACT_SENSOR in sensor_names:
+    return
+
+  toe_contact_cfg = ContactSensorCfg(
+    name=_TOE_TERRAIN_CONTACT_SENSOR,
+    primary=ContactMatch(
+      mode="subtree",
+      pattern=r"^(left_ankle_roll_link|right_ankle_roll_link)$",
+      entity="robot",
+    ),
+    secondary=ContactMatch(mode="body", pattern="terrain"),
+    fields=("found", "force", "pos", "normal", "tangent"),
+    reduce="maxforce",
+    num_slots=4,
+    global_frame=True,
+  )
+  cfg.scene.sensors = (cfg.scene.sensors or ()) + (toe_contact_cfg,)
+
+
+def _add_target_flat_patch_sampling(
+  terrain_generator: TerrainGeneratorCfg,
+) -> TerrainGeneratorCfg:
+  terrain_cfg = deepcopy(terrain_generator)
+  for name, sub_cfg in terrain_cfg.sub_terrains.items():
+    if "stairs" in name or "slope" in name:
+      target_sampling = FlatPatchSamplingCfg(
+        num_patches=128,
+        patch_radius=0.20,
+        max_height_diff=0.02,
+        x_range=(3.0, 5.0),
+        y_range=(3.0, 5.0),
+        grid_resolution=0.05,
+      )
+    else:
+      target_sampling = FlatPatchSamplingCfg(
+        num_patches=128,
+        patch_radius=0.20,
+        max_height_diff=0.02,
+        x_range=(0.5, 7.5),
+        y_range=(0.5, 7.5),
+        grid_resolution=0.05,
+      )
+
+    sub_cfg.flat_patch_sampling = dict(sub_cfg.flat_patch_sampling or {})
+    sub_cfg.flat_patch_sampling["target"] = target_sampling
+  return terrain_cfg
 
 
 def _teacherkl_play_terrain_cfg():
@@ -66,11 +138,20 @@ def _configure_teacherkl_student_env(
   cfg.sim.nconmax = 256  # 5.9: 256
   cfg.sim.njmax = 4096  # 5.9: 4096; previous: 2048
   cfg.sim.mujoco.ccd_iterations = 50  # 5.9: 50; previous: 400
-  cfg.sim.contact_sensor_maxmatch = 128  # 5.9: 128
+  cfg.sim.contact_sensor_maxmatch = 256  # 5.9: 128; toe contact reward uses extra slots
+  _add_toe_terrain_contact_sensor(cfg)
 
   # Keep terrain_scan available for critic/teacher, but make the deployed
   # student actor blind.
   del cfg.observations["actor"].terms["height_scan"]
+  cfg.observations["critic"].terms["toe_terrain_contact"] = ObservationTermCfg(
+    func=mdp.foot_contact,
+    params={"sensor_name": _TOE_TERRAIN_CONTACT_SENSOR},
+  )
+  cfg.observations["critic"].terms["toe_terrain_contact_forces"] = ObservationTermCfg(
+    func=mdp.foot_contact_forces,
+    params={"sensor_name": _TOE_TERRAIN_CONTACT_SENSOR},
+  )
 
   cfg.observations["actor"].history_length = 5  # 5.9: 3; previous: 5
   cfg.observations["critic"].history_length = 3  # 5.9: 3; previous: 1
@@ -125,6 +206,82 @@ def _configure_teacherkl_student_env(
   )
   cfg.rewards["body_ang_vel"].weight = -0.08
   cfg.rewards["angular_momentum"].weight = -0.03
+  cfg.rewards["toe_riser_contact_memory_penalty"] = RewardTermCfg(
+    func=mdp.toe_riser_contact_memory_penalty,
+    weight=-1.0,
+    params={
+      "sensor_name": _TOE_TERRAIN_CONTACT_SENSOR,
+      "free_hits": 1,
+      "cooldown_time": 0.20,
+      "min_terrain_level": 3,
+      "min_ascent_height": 0.03,
+      "ascent_velocity_threshold": 0.03,
+      "toe_x_min": 0.08,
+      "vertical_normal_z_max": 0.4,
+      "forward_velocity_threshold": 0.05,
+      "force_threshold": 15.0,
+      "force_scale": 60.0,
+      "asset_cfg": _g1_foot_body_cfg(),
+    },
+  )
+
+
+def _configure_teacherkl_target_navigation(
+  cfg: ManagerBasedRlEnvCfg, play: bool
+) -> None:
+  assert cfg.scene.terrain is not None
+  assert cfg.scene.terrain.terrain_generator is not None
+  cfg.scene.terrain.terrain_generator = _add_target_flat_patch_sampling(
+    cfg.scene.terrain.terrain_generator
+  )
+
+  twist_cmd = TeacherTargetHeadingVelocityCommandCfg(
+    entity_name="robot",
+    resampling_time_range=(7.0, 12.0),
+    heading_command=True,
+    heading_control_stiffness=0.5,
+    rel_target_envs=0.7,
+    rel_random_heading_envs=0.2,
+    rel_standing_envs=0.1,
+    patch_name="target",
+    target_reached_threshold=0.5,
+    target_min_distance=1.0,
+    target_max_distance=12.0,
+    target_tile_radius=1,
+    include_current_tile=False,
+    zero_lateral_velocity=True,
+    debug_vis=True,
+    ranges=TeacherTargetHeadingVelocityCommandCfg.Ranges(
+      lin_vel_x=(-0.5, 0.8),
+      lin_vel_y=(0.0, 0.0),
+      ang_vel_z=(-0.5, 0.5),
+      heading=(-math.pi, math.pi),
+    ),
+  )
+  twist_cmd.viz.z_offset = 1.15
+  if play:
+    twist_cmd.rel_target_envs = 1.0
+    twist_cmd.rel_random_heading_envs = 0.0
+    twist_cmd.rel_standing_envs = 0.0
+    twist_cmd.heading_control_stiffness = 0.8
+    twist_cmd.ranges.lin_vel_x = (0.3, 0.9)
+    twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
+    twist_cmd.ranges.ang_vel_z = (-0.7, 0.7)
+    twist_cmd.target_min_distance = 1.0
+    twist_cmd.target_max_distance = 10.0
+    twist_cmd.target_tile_radius = 1
+
+  cfg.commands["twist"] = twist_cmd
+  cfg.rewards["target_progress"] = RewardTermCfg(
+    func=teacher_target_progress,
+    weight=0.8,
+    params={"command_name": "twist", "min_distance": 0.05},
+  )
+  cfg.rewards["target_reached_bonus"] = RewardTermCfg(
+    func=teacher_target_reached_bonus,
+    weight=0.4,
+    params={"command_name": "twist"},
+  )
 
 
 def _reset_teacher_term_temporal_state(term: ObservationTermCfg) -> None:
@@ -157,6 +314,7 @@ def _make_teacher_terms(cfg: ManagerBasedRlEnvCfg) -> dict[str, ObservationTermC
 
 def unitree_g1_blind_rough_teacherkl_env_cfg(
   play: bool = False,
+  use_target_navigation: bool = False,
 ) -> ManagerBasedRlEnvCfg:
   """Create a blind-rough student env with privileged frozen-teacher observations.
 
@@ -168,6 +326,8 @@ def unitree_g1_blind_rough_teacherkl_env_cfg(
   """
   cfg = unitree_g1_rough_env_cfg(play=play)
   _configure_teacherkl_student_env(cfg, play=play)
+  if use_target_navigation:
+    _configure_teacherkl_target_navigation(cfg, play=play)
 
   cfg.observations["teacher"] = ObservationGroupCfg(
     terms=_make_teacher_terms(cfg),
@@ -177,7 +337,7 @@ def unitree_g1_blind_rough_teacherkl_env_cfg(
     flatten_history_dim=True,
   )
 
-  if play:
+  if play and not use_target_navigation:
     twist_cmd = cfg.commands["twist"]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
     twist_cmd.ranges.lin_vel_x = (0.5, 1.0)

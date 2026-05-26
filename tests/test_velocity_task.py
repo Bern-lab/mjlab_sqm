@@ -6,6 +6,9 @@ from mjlab.asset_zoo.robots import G1_ACTION_SCALE, GO1_ACTION_SCALE
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.tasks.registry import list_tasks, load_env_cfg
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
+from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
+  TeacherTargetHeadingVelocityCommandCfg,
+)
 
 
 @pytest.fixture(scope="module")
@@ -197,3 +200,25 @@ def test_go1_velocity_has_correct_action_scale(
     assert joint_pos_action.scale == GO1_ACTION_SCALE, (
       f"Task {task_id} action scale mismatch, expected GO1_ACTION_SCALE"
     )
+
+
+def test_teacherkl_target_navigation_switch() -> None:
+  """Teacher-KL should support both velocity and target-navigation commands."""
+  velocity_cfg = load_env_cfg("Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1")
+  target_cfg = load_env_cfg(
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"
+  )
+
+  assert isinstance(velocity_cfg.commands["twist"], UniformVelocityCommandCfg)
+  assert not isinstance(
+    velocity_cfg.commands["twist"],
+    TeacherTargetHeadingVelocityCommandCfg,
+  )
+  assert isinstance(target_cfg.commands["twist"], TeacherTargetHeadingVelocityCommandCfg)
+
+  assert "target_progress" not in velocity_cfg.rewards
+  assert "target_reached_bonus" not in velocity_cfg.rewards
+  assert "target_progress" in target_cfg.rewards
+  assert "target_reached_bonus" in target_cfg.rewards
+  assert "height_scan" not in target_cfg.observations["actor"].terms
+  assert "toe_terrain_contact" in target_cfg.observations["critic"].terms
