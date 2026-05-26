@@ -566,12 +566,25 @@ class ViserPlayViewer(BaseViewer):
         f'<br/><strong>Terrain:</strong> '
         f'<span style="color:{color};font-weight:600;">{terrain_label}</span>'
       )
+    target_line = ""
+    target_status = self.get_target_heading_status(self._scene.env_idx)
+    if target_status is not None:
+      target_label = target_status.mode
+      if target_status.distance_m is not None:
+        target_label += f" {target_status.distance_m:.2f}m"
+      if target_status.reached:
+        target_label += " reached"
+      color = "#38bdf8" if target_status.mode == "Target" else "#a3a3a3"
+      target_line = (
+        f'<br/><strong>Command:</strong> '
+        f'<span style="color:{color};font-weight:600;">{target_label}</span>'
+      )
     self._status_html.content = f"""
       <div style="font-size: 0.85em; line-height: 1.25; padding: 0 1em 0.5em 1em;">
         <strong>Status:</strong> {"Paused" if status.paused else "Running"}{capped}<br/>
         <strong>Steps:</strong> {status.step_count}<br/>
         <strong>Speed:</strong> {status.speed_label}<br/>
         <strong>Target RT:</strong> {status.target_realtime:.2f}x<br/>
-        <strong>Actual RT:</strong> {rt_display} ({status.smoothed_fps:.0f} FPS){terrain_line}{error_line}
+        <strong>Actual RT:</strong> {rt_display} ({status.smoothed_fps:.0f} FPS){terrain_line}{target_line}{error_line}
       </div>
       """

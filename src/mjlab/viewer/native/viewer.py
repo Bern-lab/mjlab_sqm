@@ -275,6 +275,15 @@ class NativeMujocoViewer(BaseViewer):
       terrain_label, _is_stairs = terrain_status
       text_1 += "\nTerrain"
       text_2 += f"\n{terrain_label}"
+    target_status = self.get_target_heading_status(self.env_idx)
+    if target_status is not None:
+      target_label = target_status.mode
+      if target_status.distance_m is not None:
+        target_label += f" {target_status.distance_m:.2f}m"
+      if target_status.reached:
+        target_label += " reached"
+      text_1 += "\nCommand"
+      text_2 += f"\n{target_label}"
     overlay = (
       mujoco.mjtFontScale.mjFONTSCALE_150.value,
       mujoco.mjtGridPos.mjGRID_TOPLEFT.value,

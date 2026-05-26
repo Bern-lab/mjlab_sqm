@@ -183,13 +183,13 @@ def unitree_g1_blind_stairs_flag_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerC
       max_grad_norm=1.0,
       teacher_kl_cfg=RslRlTeacherKLCfg(
         checkpoint_path=G1_TARGET_HEADING_DEPTH_TEACHER_KL_CHECKPOINT,
-        lambda_start=0.5,
+        lambda_start=0.4,
         lambda_end=0.0,
         warmup_iters=3000,
         constant_iters=0,
         anneal_iters=10000,
         schedule="cosine",
-        max_kl_loss=15.0,
+        max_kl_loss=10.0,
         check_shapes=True,
         fail_on_nonfinite_kl=True,
         debug_shapes=False,
@@ -203,6 +203,71 @@ def unitree_g1_blind_stairs_flag_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerC
     experiment_name="g1_blind_stairs_flag_teacherkl",
     save_interval=200,
     num_steps_per_env=24,
+    max_iterations=60_001,
+  )
+
+
+def unitree_g1_blind_stairs_flag_lstm_teacherkl_runner_cfg(
+  num_steps_per_env: int = G1_LSTM_TEACHER_KL_NUM_STEPS_PER_ENV,
+) -> RslRlTeacherKLRunnerCfg:
+  """Create LSTM PPO + depth-camera frozen-teacher-KL config for stair-flag training."""
+  return RslRlTeacherKLRunnerCfg(
+    actor=RslRlModelCfg(
+      class_name="RNNModel",
+      rnn_type="lstm",
+      rnn_hidden_dim=256,
+      rnn_num_layers=1,
+      hidden_dims=(512, 256, 128),
+      activation="elu",
+      obs_normalization=True,
+      distribution_cfg={
+        "class_name": "GaussianDistribution",
+        "init_std": 1.0,
+        "std_type": "scalar",
+      },
+    ),
+    critic=RslRlModelCfg(
+      hidden_dims=(512, 256, 128),
+      activation="elu",
+      obs_normalization=True,
+    ),
+    teacher=_unitree_g1_depth_policy_model_cfg(),
+    algorithm=RslRlPpoTeacherKLAlgorithmCfg(
+      value_loss_coef=1.0,
+      use_clipped_value_loss=True,
+      clip_param=0.2,
+      entropy_coef=0.01,
+      num_learning_epochs=5,
+      num_mini_batches=4,
+      learning_rate=1.0e-3,
+      schedule="adaptive",
+      gamma=0.99,
+      lam=0.95,
+      desired_kl=0.01,
+      max_grad_norm=1.0,
+      teacher_kl_cfg=RslRlTeacherKLCfg(
+        checkpoint_path=G1_TARGET_HEADING_DEPTH_TEACHER_KL_CHECKPOINT,
+        lambda_start=0.4,
+        lambda_end=0.0,
+        warmup_iters=3000,
+        constant_iters=0,
+        anneal_iters=12000,
+        schedule="cosine",
+        max_kl_loss=10.0,
+        max_kl_loss_tail_slope=0.1,
+        check_shapes=True,
+        fail_on_nonfinite_kl=True,
+        debug_shapes=False,
+      ),
+    ),
+    obs_groups={
+      "actor": ("actor",),
+      "critic": ("critic",),
+      "teacher": ("teacher", "camera"),
+    },
+    experiment_name="g1_blind_stairs_flag_lstm_teacherkl",
+    save_interval=200,
+    num_steps_per_env=num_steps_per_env,
     max_iterations=60_001,
   )
 

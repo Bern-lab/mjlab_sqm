@@ -131,6 +131,13 @@ class ViewerStatus:
   last_error: str | None
 
 
+@dataclass(frozen=True)
+class TargetHeadingStatus:
+  mode: str
+  distance_m: float | None
+  reached: bool
+
+
 class ViewerAction(Enum):
   RESET = "reset"
   TOGGLE_PAUSE = "toggle_pause"
@@ -507,3 +514,47 @@ class BaseViewer(ABC):
 
     is_stairs = scalar >= 0.5
     return ("Stairs" if is_stairs else "Flat", is_stairs)
+
+  def get_target_heading_status(self, env_idx: int) -> TargetHeadingStatus | None:
+    """Return target-heading command status when the active command exposes it."""
+    env = self.env.unwrapped
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is None:
+      return None
+
+    active_terms = getattr(command_manager, "active_terms", [])
+    if "twist" not in active_terms:
+      return None
+
+    try:
+      command_term = command_manager.get_term("twist")
+    except Exception:
+      return None
+    if not hasattr(command_term, "target_pos_w"):
+      return None
+
+    def _term_bool(attr_name: str) -> bool:
+      value = getattr(command_term, attr_name, None)
+      if value is None:
+        return False
+      return bool(value[env_idx].detach().cpu().item())
+
+    if _term_bool("is_target_env"):
+      mode = "Target"
+    elif _term_bool("is_random_heading_env"):
+      mode = "Heading"
+    elif _term_bool("is_standing_env"):
+      mode = "Stand"
+    else:
+      mode = "Velocity"
+
+    distance_m: float | None = None
+    target_distance = getattr(command_term, "target_distance", None)
+    if target_distance is not None and _term_bool("is_target_env"):
+      distance_m = float(target_distance[env_idx].detach().cpu().item())
+
+    return TargetHeadingStatus(
+      mode=mode,
+      distance_m=distance_m,
+      reached=_term_bool("target_reached"),
+    )
