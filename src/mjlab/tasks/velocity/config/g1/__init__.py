@@ -5,6 +5,9 @@ from .blind_rough_lstm_teacher_kl_env_cfg import (
   unitree_g1_blind_rough_lstm_teacherkl_env_cfg,
 )
 from .blind_rough_teacher_kl_env_cfg import unitree_g1_blind_rough_teacherkl_env_cfg
+from .blind_stairs_flag_teacher_kl_env_cfg import (
+  unitree_g1_blind_stairs_flag_teacherkl_env_cfg,
+)
 from .env_cfgs import (
   unitree_g1_blind_rough_env_cfg,
   unitree_g1_flat_env_cfg,
@@ -16,6 +19,7 @@ from .env_cfgs import (
 from .rl_cfg import (
   unitree_g1_blind_rough_lstm_teacherkl_runner_cfg,
   unitree_g1_blind_rough_teacherkl_runner_cfg,
+  unitree_g1_blind_stairs_flag_teacherkl_runner_cfg,
   unitree_g1_ppo_runner_cfg,
   unitree_g1_target_heading_teacher_runner_cfg,
 )
@@ -42,6 +46,14 @@ register_mjlab_task(
   env_cfg=unitree_g1_blind_rough_teacherkl_env_cfg(),
   play_env_cfg=unitree_g1_blind_rough_teacherkl_env_cfg(play=True),
   rl_cfg=unitree_g1_blind_rough_teacherkl_runner_cfg(),
+  runner_cls=VelocityOnPolicyRunner,
+)
+
+register_mjlab_task(
+  task_id="Mjlab-Velocity-Blind-StairsFlag-TeacherKL-Unitree-G1",
+  env_cfg=unitree_g1_blind_stairs_flag_teacherkl_env_cfg(),
+  play_env_cfg=unitree_g1_blind_stairs_flag_teacherkl_env_cfg(play=True),
+  rl_cfg=unitree_g1_blind_stairs_flag_teacherkl_runner_cfg(),
   runner_cls=VelocityOnPolicyRunner,
 )
 

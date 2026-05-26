@@ -270,6 +270,11 @@ class NativeMujocoViewer(BaseViewer):
       f"{status.target_realtime:.2f}x\n"
       f"{status.actual_realtime:.2f}x ({status.smoothed_fps:.0f} FPS)"
     )
+    terrain_status = self.get_terrain_status(self.env_idx)
+    if terrain_status is not None:
+      terrain_label, _is_stairs = terrain_status
+      text_1 += "\nTerrain"
+      text_2 += f"\n{terrain_label}"
     overlay = (
       mujoco.mjtFontScale.mjFONTSCALE_150.value,
       mujoco.mjtGridPos.mjGRID_TOPLEFT.value,

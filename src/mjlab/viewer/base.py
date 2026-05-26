@@ -484,3 +484,26 @@ class BaseViewer(ABC):
       capped=self._was_capped,
       last_error=self._last_error,
     )
+
+  def get_terrain_status(self, env_idx: int) -> tuple[str, bool] | None:
+    """Return optional play-time terrain mode when the policy exposes one."""
+    env = self.env.unwrapped
+    obs_manager = getattr(env, "observation_manager", None)
+    if obs_manager is None:
+      return None
+
+    active_terms = getattr(obs_manager, "active_terms", {})
+    actor_terms = active_terms.get("actor", []) if isinstance(active_terms, dict) else []
+    if "terrain_is_stairs" not in actor_terms:
+      return None
+
+    try:
+      term_cfg = obs_manager.get_term_cfg("actor", "terrain_is_stairs")
+      with torch.no_grad():
+        value = term_cfg.func(env, **term_cfg.params)
+      scalar = float(value[env_idx].reshape(-1)[0].detach().cpu().item())
+    except Exception:
+      return None
+
+    is_stairs = scalar >= 0.5
+    return ("Stairs" if is_stairs else "Flat", is_stairs)

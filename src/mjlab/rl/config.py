@@ -105,6 +105,8 @@ class RslRlTeacherKLCfg:
   """Teacher-KL weight schedule."""
   max_kl_loss: float | None = 10.0
   """Optional cap applied to the KL value used in the loss."""
+  max_kl_loss_tail_slope: float = 0.0
+  """Slope to keep above ``max_kl_loss``. 0.0 keeps the existing hard cap."""
   check_shapes: bool = True
   """Whether to check teacher/student distribution parameter shapes once."""
   fail_on_nonfinite_kl: bool = True

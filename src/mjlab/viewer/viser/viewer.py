@@ -557,12 +557,21 @@ class ViserPlayViewer(BaseViewer):
       error_line = (
         f'<br/><span style="color:#e74c3c;"><strong>Error:</strong> {first_line}</span>'
       )
+    terrain_line = ""
+    terrain_status = self.get_terrain_status(self._scene.env_idx)
+    if terrain_status is not None:
+      terrain_label, is_stairs = terrain_status
+      color = "#f59e0b" if is_stairs else "#22c55e"
+      terrain_line = (
+        f'<br/><strong>Terrain:</strong> '
+        f'<span style="color:{color};font-weight:600;">{terrain_label}</span>'
+      )
     self._status_html.content = f"""
       <div style="font-size: 0.85em; line-height: 1.25; padding: 0 1em 0.5em 1em;">
         <strong>Status:</strong> {"Paused" if status.paused else "Running"}{capped}<br/>
         <strong>Steps:</strong> {status.step_count}<br/>
         <strong>Speed:</strong> {status.speed_label}<br/>
         <strong>Target RT:</strong> {status.target_realtime:.2f}x<br/>
-        <strong>Actual RT:</strong> {rt_display} ({status.smoothed_fps:.0f} FPS){error_line}
+        <strong>Actual RT:</strong> {rt_display} ({status.smoothed_fps:.0f} FPS){terrain_line}{error_line}
       </div>
       """

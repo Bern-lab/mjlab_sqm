@@ -74,8 +74,8 @@ def _configure_teacherkl_student_env(
   # student actor blind.
   del cfg.observations["actor"].terms["height_scan"]
 
-  cfg.observations["actor"].history_length = 3  # 5.9: 3; previous: 5
-  cfg.observations["critic"].history_length = 1  # 5.9: 3; previous: 1
+  cfg.observations["actor"].history_length = 5  # 5.9: 3; previous: 5
+  cfg.observations["critic"].history_length = 3  # 5.9: 3; previous: 1
 
   actor_terms = cfg.observations["actor"].terms
   for term_name in (
@@ -105,7 +105,7 @@ def _configure_teacherkl_student_env(
     cfg.curriculum["command_vel"].params["velocity_stages"] = [
       {
         "step": 0,
-        "lin_vel_x": (-0.5, 0.8),
+        "lin_vel_x": (0.0, 0.8),
         "lin_vel_y": (0.0, 0.0),
         "ang_vel_z": (-0.5, 0.5),
       },

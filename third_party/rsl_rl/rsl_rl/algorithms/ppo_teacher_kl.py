@@ -8,10 +8,9 @@ from __future__ import annotations
 
 import copy
 import math
-from typing import Any
-
 import torch
 from tensordict import TensorDict
+from typing import Any
 
 from rsl_rl.algorithms.ppo import PPO
 from rsl_rl.env import VecEnv
@@ -281,7 +280,16 @@ class PPOTeacherKL(PPO):
 
         max_kl_loss = self.teacher_kl_cfg.get("max_kl_loss")
         if max_kl_loss is not None:
-            teacher_kl_for_loss = teacher_kl.clamp(max=float(max_kl_loss))
+            max_kl_loss = float(max_kl_loss)
+            tail_slope = float(self.teacher_kl_cfg.get("max_kl_loss_tail_slope", 0.0))
+            if tail_slope > 0.0:
+                teacher_kl_for_loss = torch.where(
+                    teacher_kl <= max_kl_loss,
+                    teacher_kl,
+                    max_kl_loss + tail_slope * (teacher_kl - max_kl_loss),
+                )
+            else:
+                teacher_kl_for_loss = teacher_kl.clamp(max=max_kl_loss)
         else:
             teacher_kl_for_loss = teacher_kl
 
@@ -351,7 +359,7 @@ class PPOTeacherKL(PPO):
         self._freeze_teacher()
 
     @staticmethod
-    def construct_algorithm(obs: TensorDict, env: VecEnv, cfg: dict, device: str) -> "PPOTeacherKL":
+    def construct_algorithm(obs: TensorDict, env: VecEnv, cfg: dict, device: str) -> PPOTeacherKL:
         """Construct the PPO + teacher-KL algorithm."""
         algorithm_cfg = copy.deepcopy(cfg["algorithm"])
         actor_cfg = copy.deepcopy(cfg["actor"])
