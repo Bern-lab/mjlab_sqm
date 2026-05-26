@@ -72,7 +72,7 @@ def _configure_teacherkl_student_env(
   # student actor blind.
   del cfg.observations["actor"].terms["height_scan"]
 
-  cfg.observations["actor"].history_length = 3  # 5.9: 3; previous: 5
+  cfg.observations["actor"].history_length = 5  # 5.9: 3; previous: 5
   cfg.observations["critic"].history_length = 3  # 5.9: 3; previous: 1
 
   actor_terms = cfg.observations["actor"].terms
