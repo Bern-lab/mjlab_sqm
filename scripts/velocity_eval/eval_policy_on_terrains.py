@@ -22,7 +22,9 @@ from scripts.velocity_eval.eval_terrains import (
   get_terrain_set,
 )
 from scripts.velocity_eval.policy_io import (
+  get_policy_output_name,
   load_inference_policy,
+  make_timestamped_policy_output_dir,
   resolve_checkpoint_path,
 )
 
@@ -49,7 +51,9 @@ class EvalPolicyConfig:
   command_wz: float = 0.0
   seed: int = 12345
   device: str | None = None
-  output_file: str | None = "eval_outputs/velocity/eval_v1.json"
+  output_root: str = "eval_outputs/velocity"
+  output_dir: str | None = None
+  output_file: str | None = None
   clean_observations: bool = True
   disable_observation_delay: bool = True
   disable_actuator_delay: bool = True
@@ -217,6 +221,32 @@ def _summarize_batches(terrain: EvalTerrainSpec, batches: list[dict]) -> dict:
   return summary
 
 
+def _resolve_output_path(
+  *,
+  cfg: EvalPolicyConfig,
+  task_id: str,
+  agent_cfg,
+  checkpoint_path: Path,
+) -> Path | None:
+  if cfg.output_file is not None:
+    output_path = Path(cfg.output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    return output_path
+
+  output_dir = (
+    Path(cfg.output_dir)
+    if cfg.output_dir is not None
+    else make_timestamped_policy_output_dir(
+      output_root=cfg.output_root,
+      task_id=task_id,
+      agent_cfg=agent_cfg,
+      checkpoint_path=checkpoint_path,
+    )
+  )
+  output_dir.mkdir(parents=True, exist_ok=True)
+  return output_dir / f"eval_{cfg.terrain_set}.json"
+
+
 def run_eval_policy(task_id: str, cfg: EvalPolicyConfig) -> dict:
   configure_torch_backends()
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -229,10 +259,23 @@ def run_eval_policy(task_id: str, cfg: EvalPolicyConfig) -> dict:
     wandb_run_path=cfg.wandb_run_path,
     wandb_checkpoint_name=cfg.wandb_checkpoint_name,
   )
+  output_path = _resolve_output_path(
+    cfg=cfg,
+    task_id=task_id,
+    agent_cfg=agent_cfg,
+    checkpoint_path=checkpoint_path,
+  )
+  policy_output_name = get_policy_output_name(
+    task_id=task_id,
+    agent_cfg=agent_cfg,
+    checkpoint_path=checkpoint_path,
+  )
 
   payload = {
     "task_id": task_id,
+    "policy_output_name": policy_output_name,
     "checkpoint": str(checkpoint_path),
+    "output_dir": str(output_path.parent) if output_path is not None else None,
     "terrain_set": cfg.terrain_set,
     "episodes_per_terrain": cfg.episodes_per_terrain,
     "command": {
@@ -277,9 +320,7 @@ def run_eval_policy(task_id: str, cfg: EvalPolicyConfig) -> dict:
       f"heel={summary['heel_riser_collision_count']:.3f}"
     )
 
-  if cfg.output_file is not None:
-    output_path = Path(cfg.output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+  if output_path is not None:
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"[INFO] Wrote evaluation results to {output_path}")
 
@@ -311,4 +352,3 @@ def main() -> None:
 
 if __name__ == "__main__":
   main()
-

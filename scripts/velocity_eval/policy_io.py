@@ -4,13 +4,69 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from pathlib import Path
+import re
 from typing import Any
 
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_runner_cls
 from mjlab.utils.lstm import reset_policy_state
 from mjlab.utils.os import get_task_log_root, get_wandb_checkpoint_path
+
+
+def _slugify(value: str) -> str:
+  value = value.strip().lower()
+  value = re.sub(r"^mjlab[-_]*", "", value)
+  value = re.sub(r"[-_]*unitree[-_]*g1$", "", value)
+  value = re.sub(r"[^a-z0-9]+", "_", value)
+  value = re.sub(r"_+", "_", value).strip("_")
+  return value or "policy"
+
+
+def get_policy_output_name(
+  *,
+  task_id: str,
+  agent_cfg: Any,
+  checkpoint_path: Path | None = None,
+) -> str:
+  """Return a concise folder name for outputs from one trained policy family."""
+  experiment_name = getattr(agent_cfg, "experiment_name", None)
+  if experiment_name:
+    return _slugify(str(experiment_name))
+
+  if checkpoint_path is not None:
+    parts = checkpoint_path.parts
+    if "rsl_rl" in parts:
+      idx = parts.index("rsl_rl")
+      if len(parts) > idx + 1:
+        return _slugify(parts[idx + 1])
+
+  return _slugify(task_id)
+
+
+def make_timestamped_policy_output_dir(
+  *,
+  output_root: str | Path,
+  task_id: str,
+  agent_cfg: Any,
+  checkpoint_path: Path | None = None,
+) -> Path:
+  """Create ``output_root / policy_name / timestamp`` with collision suffixes."""
+  policy_name = get_policy_output_name(
+    task_id=task_id,
+    agent_cfg=agent_cfg,
+    checkpoint_path=checkpoint_path,
+  )
+  root = Path(output_root) / policy_name
+  timestamp = datetime.now().strftime("%m%d_%H%M%S")
+  output_dir = root / timestamp
+  suffix = 1
+  while output_dir.exists():
+    output_dir = root / f"{timestamp}_{suffix:02d}"
+    suffix += 1
+  output_dir.mkdir(parents=True, exist_ok=False)
+  return output_dir
 
 
 def make_inference_train_cfg(agent_cfg: Any) -> dict[str, Any]:
@@ -92,4 +148,3 @@ def load_inference_policy(
   policy.eval()
   reset_policy_state(policy)
   return policy, runner
-

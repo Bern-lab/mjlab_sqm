@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +13,7 @@ import tyro
 from scripts.velocity_eval.eval_terrains import apply_eval_overrides, get_terrain_set
 from scripts.velocity_eval.policy_io import (
   load_inference_policy,
+  make_timestamped_policy_output_dir,
   resolve_checkpoint_path,
 )
 
@@ -47,19 +47,13 @@ class CollectLatentsConfig:
   disable_actuator_delay: bool = True
 
 
-def _make_timestamped_output_dir(output_root: str) -> Path:
-  root = Path(output_root)
-  timestamp = datetime.now().strftime("%m%d_%H%M%S")
-  output_dir = root / timestamp
-  suffix = 1
-  while output_dir.exists():
-    output_dir = root / f"{timestamp}_{suffix:02d}"
-    suffix += 1
-  output_dir.mkdir(parents=True, exist_ok=False)
-  return output_dir
-
-
-def _resolve_output_path(cfg: CollectLatentsConfig) -> Path:
+def _resolve_output_path(
+  *,
+  cfg: CollectLatentsConfig,
+  task_id: str,
+  agent_cfg,
+  checkpoint_path: Path,
+) -> Path:
   if cfg.output_file is not None:
     output_path = Path(cfg.output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,7 +63,12 @@ def _resolve_output_path(cfg: CollectLatentsConfig) -> Path:
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
   else:
-    output_dir = _make_timestamped_output_dir(cfg.output_root)
+    output_dir = make_timestamped_policy_output_dir(
+      output_root=cfg.output_root,
+      task_id=task_id,
+      agent_cfg=agent_cfg,
+      checkpoint_path=checkpoint_path,
+    )
 
   return output_dir / f"latents_{cfg.terrain_set}.npz"
 
@@ -230,7 +229,12 @@ def run_collect_latents(task_id: str, cfg: CollectLatentsConfig) -> dict[str, np
     wandb_run_path=cfg.wandb_run_path,
     wandb_checkpoint_name=cfg.wandb_checkpoint_name,
   )
-  output_path = _resolve_output_path(cfg)
+  output_path = _resolve_output_path(
+    cfg=cfg,
+    task_id=task_id,
+    agent_cfg=agent_cfg,
+    checkpoint_path=checkpoint_path,
+  )
   print(f"[INFO] Output directory: {output_path.parent}")
 
   chunks = []

@@ -31,11 +31,10 @@ Example with a local checkpoint:
 
 ```bash
 uv run python scripts/velocity_eval/eval_policy_on_terrains.py \
-  Mjlab-Velocity-Blind-Rough-LSTM-TeacherKL-Unitree-G1 \
+  Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 \
   --checkpoint-file /path/to/model.pt \
   --episodes-per-terrain 50 \
-  --num-envs 50 \
-  --output-file eval_outputs/velocity/eval_v1_lstm.json
+  --num-envs 50
 ```
 
 Example with a W&B run:
@@ -64,11 +63,21 @@ The JSON output includes:
 - `foot_clearance`
 - collision counts by stair level
 
+If `--output-file` is omitted, each evaluation run creates a folder grouped by
+the trained policy family and then by timestamp, for example:
+
+```text
+eval_outputs/velocity/g1_blind_rough_teacherkl/0526_143012/eval_eval_v1.json
+```
+
+Pass `--output-dir` to choose the timestamp folder yourself, or `--output-file`
+to write to one exact file.
+
 ## Collect Latents
 
 ```bash
 uv run python scripts/velocity_eval/collect_policy_latents.py \
-  Mjlab-Velocity-Blind-Rough-LSTM-TeacherKL-Unitree-G1 \
+  Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1 \
   --checkpoint-file /path/to/model.pt \
   --episodes-per-terrain 20 \
   --num-envs 20 \
@@ -78,15 +87,18 @@ uv run python scripts/velocity_eval/collect_policy_latents.py \
 For MLP actors, the saved latent is the hidden activation before the final actor
 linear layer. For recurrent actors, it is the last recurrent hidden state.
 
-If `--output-file` is omitted, each collection run creates a fresh timestamped
-folder such as `eval_outputs/velocity/0525_163012/` and writes
-`latents_cluster_v1.npz` inside it.
+If `--output-file` is omitted, each collection run uses the same grouped folder
+layout, for example:
+
+```text
+eval_outputs/velocity/g1_blind_rough_teacherkl/0526_143012/latents_cluster_v1.npz
+```
 
 ## Quick PCA
 
 ```bash
 uv run python scripts/velocity_eval/analyze_latent_clusters.py \
-  --input-file eval_outputs/velocity/0525_163012/latents_cluster_v1.npz \
+  --input-file eval_outputs/velocity/g1_blind_rough_teacherkl/0526_143012/latents_cluster_v1.npz \
   --phase-bins 8
 ```
 

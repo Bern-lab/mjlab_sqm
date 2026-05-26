@@ -11,7 +11,7 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.tasks.velocity import mdp
-from mjlab.tasks.velocity.mdp.target_heading_rewards import _current_step_boundaries
+from mjlab.tasks.velocity.mdp.rewards import _current_step_boundaries
 
 MEAN_METRIC_NAMES = (
   "tracking_error",
