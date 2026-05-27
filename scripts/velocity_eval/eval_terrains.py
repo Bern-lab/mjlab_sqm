@@ -25,6 +25,25 @@ class EvalTerrainSpec:
   platform_width: float = 3.0
   terrain_size: tuple[float, float] = (8.0, 8.0)
   border_width: float = 20.0
+  stair_riser_levels: int = 10
+  stair_border_width: float = 1.0
+
+  def generator_size(self) -> tuple[float, float]:
+    """Return the terrain-generator tile size for this fixed terrain."""
+    if self.kind not in ("upstairs", "downstairs"):
+      return self.terrain_size
+
+    # BoxPyramidStairsTerrainCfg derives num_steps from size. It creates
+    # num_steps + 1 riser boundaries, so use one fewer stair ring to expose the
+    # requested number of riser levels for by-level collision statistics.
+    stair_rings = max(0, self.stair_riser_levels - 1)
+    side = (
+      2.0 * self.stair_border_width
+      + self.platform_width
+      + 2.0 * self.step_width * stair_rings
+      + 1e-6
+    )
+    return (side, side)
 
   def make_subterrain(self) -> SubTerrainCfg:
     """Build a single fixed sub-terrain config."""
@@ -46,7 +65,7 @@ class EvalTerrainSpec:
       step_height_range=(self.height_m, self.height_m),
       step_width=self.step_width,
       platform_width=self.platform_width,
-      border_width=1.0,
+      border_width=self.stair_border_width,
     )
     if self.kind == "upstairs":
       # The inverted pyramid starts low at the center, so walking out from the
@@ -148,7 +167,7 @@ def make_fixed_terrain_generator(
   return TerrainGeneratorCfg(
     seed=seed,
     curriculum=False,
-    size=terrain.terrain_size,
+    size=terrain.generator_size(),
     border_width=terrain.border_width,
     num_rows=1,
     num_cols=max(1, num_envs),
@@ -241,6 +260,22 @@ def _fix_velocity_command(
   cfg.commands["twist"] = twist_cmd
 
 
+def _enable_eval_riser_contact_sensor(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Add true foot-vs-terrain contact data for eval-only collision metrics."""
+  try:
+    from mjlab.tasks.velocity.config.g1.blind_rough_toe_contact_cfg import (
+      add_g1_toe_terrain_contact_sensor,
+    )
+  except ImportError:
+    return
+
+  cfg.sim.contact_sensor_maxmatch = max(
+    int(getattr(cfg.sim, "contact_sensor_maxmatch", 0) or 0), 256
+  )
+  cfg.sim.nconmax = max(int(getattr(cfg.sim, "nconmax", 0) or 0), 256)
+  add_g1_toe_terrain_contact_sensor(cfg)
+
+
 def apply_eval_overrides(
   cfg: ManagerBasedRlEnvCfg,
   terrain: EvalTerrainSpec,
@@ -252,6 +287,7 @@ def apply_eval_overrides(
   clean_observations: bool = True,
   disable_observation_delay: bool = True,
   disable_actuator_delay: bool = True,
+  enable_riser_contact_sensor: bool = False,
 ) -> ManagerBasedRlEnvCfg:
   """Apply deterministic offline-eval overrides to a copied env config."""
   cfg.seed = seed
@@ -271,6 +307,8 @@ def apply_eval_overrides(
   _fix_velocity_command(
     cfg, command=command, max_episode_length_s=max_episode_length_s
   )
+  if enable_riser_contact_sensor:
+    _enable_eval_riser_contact_sensor(cfg)
 
   if clean_observations:
     for group_cfg in cfg.observations.values():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,7 @@ from scripts.velocity_eval.policy_io import (
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
+from mjlab.utils.lab_api.math import wrap_to_pi
 from mjlab.utils.lstm import reset_policy_state_from_step
 from mjlab.utils.torch import configure_torch_backends
 
@@ -59,7 +61,10 @@ class EvalPolicyConfig:
   clean_observations: bool = True
   disable_observation_delay: bool = True
   disable_actuator_delay: bool = True
-  max_stair_levels: int = 12
+  max_stair_levels: int = 10
+  heading_failure_enabled: bool = True
+  heading_failure_angle_deg: float = 45.0
+  heading_failure_grace_s: float = 0.0
 
 
 def _empty_batch_tensors(
@@ -74,6 +79,68 @@ def _empty_batch_tensors(
     for name in LEVEL_EVENT_NAMES
   }
   return sums, level_sums
+
+
+def _heading_error(env: ManagerBasedRlEnv, cfg: EvalPolicyConfig) -> torch.Tensor:
+  command_norm = math.hypot(cfg.command_vx, cfg.command_vy)
+  if command_norm <= 1e-6:
+    return torch.zeros(env.num_envs, device=env.device)
+
+  desired_heading = math.atan2(cfg.command_vy, cfg.command_vx)
+  asset = env.scene["robot"]
+  return torch.abs(wrap_to_pi(asset.data.heading_w - desired_heading))
+
+
+def _heading_failure_mask(
+  env: ManagerBasedRlEnv,
+  cfg: EvalPolicyConfig,
+  *,
+  step_counts: torch.Tensor,
+) -> torch.Tensor:
+  if not cfg.heading_failure_enabled:
+    return torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
+  command_norm = math.hypot(cfg.command_vx, cfg.command_vy)
+  if command_norm <= 1e-6:
+    return torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
+  grace_done = step_counts * env.step_dt >= cfg.heading_failure_grace_s
+  threshold = math.radians(cfg.heading_failure_angle_deg)
+  return grace_done & (_heading_error(env, cfg) > threshold)
+
+
+def _level_collision_table(
+  terrain: EvalTerrainSpec,
+  summary: dict,
+  max_levels: int,
+) -> list[dict[str, float | int]]:
+  if terrain.kind not in {"upstairs", "downstairs"}:
+    return []
+
+  toe = summary["toe_riser_collision_by_level"]
+  heel = summary["heel_riser_collision_by_level"]
+  lip = summary["foot_lip_collision_by_level"]
+  level_count = min(max_levels, len(toe), len(heel), len(lip))
+  rows: list[dict[str, float | int]] = []
+  for index in range(level_count):
+    toe_count = float(toe[index])
+    heel_count = float(heel[index])
+    lip_count = float(lip[index])
+    rows.append(
+      {
+        "level_low_to_high": index + 1,
+        "height_m": (
+          float((index + 1) * terrain.height_m)
+          if terrain.height_m is not None
+          else 0.0
+        ),
+        "toe_riser_collision_count": toe_count,
+        "heel_riser_collision_count": heel_count,
+        "foot_lip_collision_count": lip_count,
+        "total_riser_collision_count": toe_count + heel_count,
+      }
+    )
+  return rows
 
 
 def _run_batch(
@@ -98,6 +165,7 @@ def _run_batch(
     clean_observations=cfg.clean_observations,
     disable_observation_delay=cfg.disable_observation_delay,
     disable_actuator_delay=cfg.disable_actuator_delay,
+    enable_riser_contact_sensor="g1" in task_id.lower(),
   )
 
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
@@ -121,6 +189,8 @@ def _run_batch(
     done_envs = torch.zeros(batch_size, dtype=torch.bool, device=device)
     success = torch.zeros(batch_size, dtype=torch.bool, device=device)
     fell = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    heading_failed = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    max_heading_error = torch.zeros(batch_size, device=device)
 
     max_steps = wrapped.unwrapped.max_episode_length + 2
     for _step in range(max_steps):
@@ -147,20 +217,35 @@ def _run_batch(
       reset_policy_state_from_step(policy, step_result)
       obs, _rewards, dones, _extras = step_result
 
+      heading_error = _heading_error(wrapped.unwrapped, cfg)
+      max_heading_error = torch.where(
+        active, torch.maximum(max_heading_error, heading_error), max_heading_error
+      )
       dones = dones.bool()
       terminated = wrapped.unwrapped.termination_manager.terminated.bool()
       truncated = wrapped.unwrapped.termination_manager.time_outs.bool()
       newly_done = dones & active
+      heading_failed_now = (
+        _heading_failure_mask(
+          wrapped.unwrapped,
+          cfg,
+          step_counts=step_counts,
+        )
+        & active
+        & ~newly_done
+      )
       if "fell_over" in wrapped.unwrapped.termination_manager.active_terms:
         fell_now = wrapped.unwrapped.termination_manager.get_term("fell_over").bool()
       else:
         fell_now = terminated
       success |= newly_done & truncated & ~terminated
       fell |= newly_done & fell_now
-      done_envs |= newly_done
+      heading_failed |= heading_failed_now
+      done_envs |= newly_done | heading_failed_now
 
     unfinished = ~done_envs
     success |= unfinished
+    collision_stats_valid = ~heading_failed
     safe_counts = step_counts.clamp_min(1.0)
     mean_metrics = {
       name: (metric_sums[name] / safe_counts).detach().cpu().tolist()
@@ -173,8 +258,15 @@ def _run_batch(
       name: level_sums[name].detach().cpu().tolist() for name in LEVEL_EVENT_NAMES
     }
     return {
+      "event_source": detector.event_source,
       "success": success.detach().cpu().tolist(),
       "fell": fell.detach().cpu().tolist(),
+      "heading_failed": heading_failed.detach().cpu().tolist(),
+      "collision_stats_valid": collision_stats_valid.detach().cpu().tolist(),
+      "max_heading_error_deg": torch.rad2deg(max_heading_error)
+      .detach()
+      .cpu()
+      .tolist(),
       "episode_length_steps": step_counts.detach().cpu().tolist(),
       "mean_metrics": mean_metrics,
       "event_counts": event_counts,
@@ -188,20 +280,42 @@ def _run_batch(
 def _summarize_batches(terrain: EvalTerrainSpec, batches: list[dict]) -> dict:
   success = [item for batch in batches for item in batch["success"]]
   fell = [item for batch in batches for item in batch["fell"]]
+  heading_failed = [item for batch in batches for item in batch["heading_failed"]]
+  collision_valid = [
+    item for batch in batches for item in batch["collision_stats_valid"]
+  ]
   lengths = [item for batch in batches for item in batch["episode_length_steps"]]
+  heading_errors = [
+    item for batch in batches for item in batch["max_heading_error_deg"]
+  ]
   step_dt = batches[0]["step_dt"] if batches else 0.0
   episodes = max(1, len(success))
+  collision_episodes = max(1, sum(bool(item) for item in collision_valid))
 
   summary = {
     "terrain": terrain.name,
     "terrain_label": terrain.label,
     "terrain_kind": terrain.kind,
     "height_m": terrain.height_m,
+    "stair_riser_levels": (
+      terrain.stair_riser_levels
+      if terrain.kind in {"upstairs", "downstairs"}
+      else None
+    ),
+    "collision_event_source": batches[0].get("event_source") if batches else None,
     "episodes": len(success),
+    "collision_stat_episodes": int(sum(bool(item) for item in collision_valid)),
+    "collision_stat_excluded_episodes": int(
+      len(collision_valid) - sum(bool(item) for item in collision_valid)
+    ),
     "success_rate": float(sum(success) / episodes),
     "fall_rate": float(sum(fell) / episodes),
+    "heading_failure_rate": float(sum(heading_failed) / episodes),
     "mean_episode_length_s": float(sum(lengths) * step_dt / episodes),
     "mean_episode_length_steps": float(sum(lengths) / episodes),
+    "mean_max_heading_error_deg": float(
+      sum(heading_errors) / max(1, len(heading_errors))
+    ),
   }
 
   for name in MEAN_METRIC_NAMES:
@@ -210,15 +324,28 @@ def _summarize_batches(terrain: EvalTerrainSpec, batches: list[dict]) -> dict:
 
   for name in EVENT_COUNT_NAMES:
     values = [v for batch in batches for v in batch["event_counts"][name]]
-    summary[f"{name}_count"] = float(sum(values) / max(1, len(values)))
+    summary[f"{name}_count"] = float(
+      sum(value for value, valid in zip(values, collision_valid, strict=True) if valid)
+      / collision_episodes
+    )
 
   for name in LEVEL_EVENT_NAMES:
     total = [0.0 for _ in range(len(batches[0]["level_counts"][name][0]))]
     for batch in batches:
-      for row in batch["level_counts"][name]:
+      for row, valid in zip(
+        batch["level_counts"][name],
+        batch["collision_stats_valid"],
+        strict=True,
+      ):
+        if not valid:
+          continue
         for idx, value in enumerate(row):
           total[idx] += value
-    summary[name] = [value / episodes for value in total]
+    summary[name] = [value / collision_episodes for value in total]
+
+  summary["collision_by_stair_level_low_to_high"] = _level_collision_table(
+    terrain, summary, len(batches[0]["level_counts"][LEVEL_EVENT_NAMES[0]][0])
+  )
 
   return summary
 
@@ -280,7 +407,9 @@ def _metric_cell_color(column_name: str, value: float) -> str:
     return "#f7d4d4"
   if column_name == "fall %":
     return "#f7d4d4" if value > 0.0 else "#f3f6f8"
-  if column_name in {"toe", "heel", "lip"}:
+  if column_name == "dir fail %":
+    return "#f7d4d4" if value > 0.0 else "#f3f6f8"
+  if column_name in {"toe hit", "heel hit", "lip"}:
     if value <= 0.0:
       return "#f3f6f8"
     if value <= 5.0:
@@ -299,10 +428,11 @@ def _write_summary_table_image(payload: dict, output_path: Path) -> None:
     "terrain",
     "success %",
     "fall %",
+    "dir fail %",
     "len s",
     "track err",
-    "toe",
-    "heel",
+    "toe hit",
+    "heel hit",
     "lip",
     "pitch/roll",
     "torque",
@@ -314,6 +444,7 @@ def _write_summary_table_image(payload: dict, output_path: Path) -> None:
       item["terrain"],
       item["success_rate"] * 100.0,
       item["fall_rate"] * 100.0,
+      item["heading_failure_rate"] * 100.0,
       item["mean_episode_length_s"],
       item["tracking_error"],
       item["toe_riser_collision_count"],
@@ -328,18 +459,19 @@ def _write_summary_table_image(payload: dict, output_path: Path) -> None:
         str(row_values[0]),
         f"{row_values[1]:.0f}",
         f"{row_values[2]:.0f}",
-        f"{row_values[3]:.2f}",
-        f"{row_values[4]:.3f}",
+        f"{row_values[3]:.0f}",
+        f"{row_values[4]:.2f}",
         f"{row_values[5]:.2f}",
         f"{row_values[6]:.2f}",
         f"{row_values[7]:.2f}",
-        f"{row_values[8]:.3f}",
+        f"{row_values[8]:.2f}",
         f"{row_values[9]:.3f}",
+        f"{row_values[10]:.3f}",
       ]
     )
 
   fig_height = max(2.8, 1.35 + 0.42 * max(1, len(text_rows)))
-  fig, ax = plt.subplots(figsize=(13.0, fig_height), dpi=180)
+  fig, ax = plt.subplots(figsize=(14.5, fig_height), dpi=180)
   ax.axis("off")
   command = payload.get("command", {})
   title = (
@@ -383,7 +515,7 @@ def _write_summary_table_image(payload: dict, output_path: Path) -> None:
     value = float(numeric_rows[row_idx - 1][col_idx])
     cell.set_facecolor(_metric_cell_color(columns[col_idx], value))
 
-  footer = "Collision columns are mean event counts per episode. Lower tracking, collision, pitch/roll, and torque are better."
+  footer = "Direction failures count as failed episodes; their collision events are excluded from toe/heel level averages."
   ax.text(
     0.5,
     0.04,
@@ -437,6 +569,14 @@ def run_eval_policy(task_id: str, cfg: EvalPolicyConfig) -> dict:
       "wz": cfg.command_wz,
     },
     "max_episode_length_s": cfg.max_episode_length_s,
+    "heading_failure": {
+      "enabled": cfg.heading_failure_enabled,
+      "angle_deg": cfg.heading_failure_angle_deg,
+      "grace_s": cfg.heading_failure_grace_s,
+      "collision_stats_policy": (
+        "episodes ending by heading failure are excluded from collision averages"
+      ),
+    },
     "seed": cfg.seed,
     "terrains": [],
   }
@@ -469,6 +609,7 @@ def run_eval_policy(task_id: str, cfg: EvalPolicyConfig) -> dict:
       "[INFO] "
       f"{terrain.name}: success={summary['success_rate']:.3f}, "
       f"fall={summary['fall_rate']:.3f}, "
+      f"dir_fail={summary['heading_failure_rate']:.3f}, "
       f"toe={summary['toe_riser_collision_count']:.3f}, "
       f"heel={summary['heel_riser_collision_count']:.3f}"
     )
