@@ -89,6 +89,8 @@ class RslRlPpoAlgorithmCfg:
 class RslRlTeacherKLCfg:
   """Config for frozen-teacher guidance regularization."""
 
+  enabled: bool = True
+  """Whether to enable frozen-teacher guidance. False makes PPOTeacherKL run as pure PPO."""
   checkpoint_path: str | None = None
   """Path to the rsl-rl teacher checkpoint containing ``actor_state_dict``."""
   loss_type: Literal["kl", "mean_mse", "mean_huber"] = "kl"

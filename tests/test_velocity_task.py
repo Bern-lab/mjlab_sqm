@@ -253,11 +253,12 @@ def test_teacherkl_uses_delayed_mean_huber_guidance() -> None:
   for cfg in (velocity_cfg, target_cfg):
     teacher_cfg = cfg.algorithm.teacher_kl_cfg
     assert cfg.obs_groups["teacher"] == ("teacher", "camera")
+    assert teacher_cfg.enabled is True
     assert teacher_cfg.loss_type == "mean_huber"
-    assert teacher_cfg.lambda_start == 0.03
-    assert teacher_cfg.lambda_end == 0.005
-    assert teacher_cfg.warmup_iters == 1500
-    assert teacher_cfg.anneal_iters == 20000
+    assert teacher_cfg.lambda_start == 0.05
+    assert teacher_cfg.lambda_end == 0.0
+    assert teacher_cfg.warmup_iters == 1000
+    assert teacher_cfg.anneal_iters == 8000
     assert teacher_cfg.huber_delta == 0.5
     assert teacher_cfg.max_teacher_loss == 3.0
     assert teacher_cfg.max_kl_loss is None

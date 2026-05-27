@@ -44,6 +44,7 @@ class PPOTeacherKL(PPO):
         self.teacher_loaded = False
         self.teacher_kl_cfg = dict(teacher_kl_cfg or {})
         self._teacher_kl_shapes_checked = False
+        self.teacher_guidance_enabled = bool(self.teacher_kl_cfg.get("enabled", True))
 
         # Allow checkpoint path to be supplied either inside teacher_kl_cfg or as a direct keyword.
         self.teacher_checkpoint_path: str | None = None
@@ -67,6 +68,7 @@ class PPOTeacherKL(PPO):
 
         self.teacher_kl_cfg.update(
             {
+                "enabled": self.teacher_guidance_enabled,
                 "loss_type": self.teacher_guidance_loss_type,
                 "lambda_start": self.teacher_kl_lambda_start,
                 "lambda_end": self.teacher_kl_lambda_end,
@@ -294,6 +296,15 @@ class PPOTeacherKL(PPO):
         distribution_params: tuple[torch.Tensor, ...],
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Compute the frozen-teacher guidance loss."""
+        if not self.teacher_guidance_enabled:
+            return torch.zeros((), device=self.device), {
+                "teacher_loss": 0.0,
+                "teacher_loss_for_update": 0.0,
+                "teacher_lambda": 0.0,
+                "teacher_kl_lambda": 0.0,
+                "teacher_guidance_enabled": 0.0,
+            }
+
         if self.teacher is None or not self.teacher_loaded:
             raise RuntimeError("Teacher KL loss requires a loaded teacher model.")
         if batch.observations is None:
@@ -408,16 +419,25 @@ class PPOTeacherKL(PPO):
         critic_cfg = copy.deepcopy(cfg["critic"])
         teacher_cfg = copy.deepcopy(cfg.get("teacher", cfg["actor"]))
         obs_groups_cfg = copy.deepcopy(cfg["obs_groups"])
+        teacher_guidance_cfg = algorithm_cfg.get("teacher_kl_cfg") or {}
+        teacher_guidance_enabled = bool(teacher_guidance_cfg.get("enabled", True))
 
         # Resolve class callables
         alg_class: type[PPOTeacherKL] = resolve_callable(algorithm_cfg.pop("class_name"))  # type: ignore
         actor_class: type[MLPModel] = resolve_callable(actor_cfg.pop("class_name"))  # type: ignore
         critic_class: type[MLPModel] = resolve_callable(critic_cfg.pop("class_name"))  # type: ignore
-        teacher_class_name = teacher_cfg.pop("class_name", None)
-        teacher_class: type[MLPModel] = resolve_callable(teacher_class_name) if teacher_class_name else actor_class
+        if teacher_guidance_enabled:
+            teacher_class_name = teacher_cfg.pop("class_name", None)
+            teacher_class: type[MLPModel] | None = (
+                resolve_callable(teacher_class_name) if teacher_class_name else actor_class
+            )
+        else:
+            teacher_class = None
 
         # Resolve observation groups
-        default_sets = ["actor", "critic", "teacher"]
+        default_sets = ["actor", "critic"]
+        if teacher_guidance_enabled:
+            default_sets.append("teacher")
         if "rnd_cfg" in algorithm_cfg and algorithm_cfg["rnd_cfg"] is not None:
             default_sets.append("rnd_state")
         obs_groups = resolve_obs_groups(obs, obs_groups_cfg, default_sets)
@@ -435,10 +455,16 @@ class PPOTeacherKL(PPO):
             critic_cfg["cnns"] = actor.cnns  # type: ignore
         critic: MLPModel = critic_class(obs, obs_groups, "critic", 1, **critic_cfg).to(device)
         print(f"Critic Model: {critic}")
-        teacher: MLPModel = teacher_class(obs, obs_groups, "teacher", env.num_actions, **teacher_cfg).to(device)
-        if teacher.is_recurrent:
-            raise ValueError("PPOTeacherKL currently supports feedforward teacher actors only.")
-        print(f"Teacher Model: {teacher}")
+        teacher: MLPModel | None = None
+        if teacher_guidance_enabled:
+            if teacher_class is None:
+                raise RuntimeError("teacher_class should be resolved when teacher guidance is enabled.")
+            teacher = teacher_class(obs, obs_groups, "teacher", env.num_actions, **teacher_cfg).to(device)
+            if teacher.is_recurrent:
+                raise ValueError("PPOTeacherKL currently supports feedforward teacher actors only.")
+            print(f"Teacher Model: {teacher}")
+        else:
+            print("Teacher guidance disabled: training with PPO loss only.")
 
         # Initialize the storage
         storage = RolloutStorage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions], device)
@@ -448,8 +474,9 @@ class PPOTeacherKL(PPO):
         alg: PPOTeacherKL = alg_class(
             actor, critic, storage, device=device, **algorithm_cfg, multi_gpu_cfg=cfg["multi_gpu"]
         )
-        alg.teacher = teacher
-        alg.load_teacher_checkpoint()
+        if teacher is not None:
+            alg.teacher = teacher
+            alg.load_teacher_checkpoint()
 
         # Compile the algorithm's learnable models if requested. The teacher remains an uncompiled frozen reference.
         alg.compile(cfg.get("torch_compile_mode"))

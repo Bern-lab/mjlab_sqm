@@ -123,6 +123,7 @@ def unitree_g1_blind_rough_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerCfg:
       desired_kl=0.01,
       max_grad_norm=1.0,
       teacher_kl_cfg=RslRlTeacherKLCfg(
+        enabled=True,
         checkpoint_path=G1_TEACHER_KL_CHECKPOINT,
         loss_type="mean_huber",
         lambda_start=0.05,

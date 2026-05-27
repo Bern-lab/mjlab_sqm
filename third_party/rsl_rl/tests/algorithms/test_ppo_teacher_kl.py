@@ -15,6 +15,11 @@ OBS_DIM = 8
 NUM_ACTIONS = 3
 
 
+class _DummyEnv:
+    num_actions = NUM_ACTIONS
+    num_envs = NUM_ENVS
+
+
 def _build_teacher_kl(loss_cfg: dict) -> PPOTeacherKL:
     obs = TensorDict(
         {
@@ -76,3 +81,64 @@ def test_mean_huber_guidance_applies_loss_cap() -> None:
     assert loss.item() == 0.25
     assert logs["teacher_loss_for_update"].item() == 0.25
     assert logs["teacher_mean_huber"].item() > loss.item()
+
+
+def test_disabled_guidance_runs_without_teacher() -> None:
+    """Disabled teacher guidance should reduce the additional loss to zero."""
+    alg = _build_teacher_kl({"enabled": False})
+
+    loss, logs = alg._compute_additional_loss(
+        batch=None,  # type: ignore[arg-type]
+        original_batch_size=0,
+        distribution_params=(),
+    )
+
+    assert loss.item() == 0.0
+    assert logs["teacher_loss"] == 0.0
+    assert logs["teacher_loss_for_update"] == 0.0
+    assert logs["teacher_kl_lambda"] == 0.0
+    assert logs["teacher_guidance_enabled"] == 0.0
+
+
+def test_construct_disabled_guidance_skips_teacher_loading() -> None:
+    """Disabled teacher guidance should not construct or load the teacher."""
+    obs = TensorDict(
+        {
+            "actor": torch.zeros(NUM_ENVS, OBS_DIM),
+            "critic": torch.zeros(NUM_ENVS, OBS_DIM),
+            "teacher": torch.zeros(NUM_ENVS, OBS_DIM),
+            "camera": torch.zeros(NUM_ENVS, 1, 8, 8),
+        },
+        batch_size=[NUM_ENVS],
+    )
+    cfg = {
+        "algorithm": {
+            "class_name": "PPOTeacherKL",
+            "teacher_kl_cfg": {"enabled": False},
+        },
+        "actor": {
+            "class_name": "MLPModel",
+            "hidden_dims": [16],
+            "distribution_cfg": {"class_name": "GaussianDistribution"},
+        },
+        "critic": {"class_name": "MLPModel", "hidden_dims": [16]},
+        "teacher": {
+            "class_name": "MLPModel",
+            "hidden_dims": [16],
+            "distribution_cfg": {"class_name": "GaussianDistribution"},
+        },
+        "obs_groups": {
+            "actor": ["actor"],
+            "critic": ["critic"],
+            "teacher": ["teacher", "camera"],
+        },
+        "num_steps_per_env": NUM_STEPS,
+        "multi_gpu": None,
+        "torch_compile_mode": None,
+    }
+
+    alg = PPOTeacherKL.construct_algorithm(obs, _DummyEnv(), cfg, "cpu")
+
+    assert alg.teacher_guidance_enabled is False
+    assert alg.teacher is None
+    assert alg.teacher_loaded is False
