@@ -10,8 +10,9 @@ from mjlab.rl import (
 )
 
 G1_TEACHER_KL_CHECKPOINT = (
-  "/home/ubt2204/work/mjlab_new/mjlab_new/logs/rsl_rl/g1_velocity_teacher/"
-  "2026-04-29_19-29-39/model_84250.pt"
+  "logs/rsl_rl/g1_velocity_target_heading_teacher_depth/"
+  "Mjlab-Velocity-TargetHeading-Rough-Teacher-Unitree-G1/"
+  "2026-05-21_11-54-52_rollback_29750/model_118200.pt"
 )
 
 _DEPTH_CNN_CFG = {
@@ -82,7 +83,7 @@ def unitree_g1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     experiment_name="g1_velocity",
     save_interval=50,
     num_steps_per_env=24,
-    max_iterations=100_001,
+    max_iterations=40_001,
   )
 
 
@@ -107,7 +108,7 @@ def unitree_g1_blind_rough_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerCfg:
       activation="elu",
       obs_normalization=True,
     ),
-    teacher=_unitree_g1_policy_model_cfg(),
+    teacher=_unitree_g1_depth_policy_model_cfg(),
     algorithm=RslRlPpoTeacherKLAlgorithmCfg(
       value_loss_coef=1.0,
       use_clipped_value_loss=True,
@@ -123,13 +124,17 @@ def unitree_g1_blind_rough_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerCfg:
       max_grad_norm=1.0,
       teacher_kl_cfg=RslRlTeacherKLCfg(
         checkpoint_path=G1_TEACHER_KL_CHECKPOINT,
-        lambda_start=0.5,  # 5.9: 0.5; previous: 0.6/0.8
-        lambda_end=0.0,  # 5.9: 0.0; previous: 0.01
-        warmup_iters=3000,  # 5.9: 0; previous: 1500
+        loss_type="mean_huber",
+        lambda_start=0.05,
+        lambda_end=0.0,
+        warmup_iters=1000,
         constant_iters=0,
-        anneal_iters=10000,  # 5.9: 3000; previous: 10000
+        anneal_iters=8000,
         schedule="cosine",
-        max_kl_loss=20.0,  # 5.9: 10.0; previous: 20/None
+        huber_delta=0.5,
+        max_teacher_loss=3.0,
+        max_kl_loss=None,
+        max_kl_loss_tail_slope=0.0,
         check_shapes=True,
         fail_on_nonfinite_kl=True,
         debug_shapes=False,
@@ -138,7 +143,7 @@ def unitree_g1_blind_rough_teacherkl_runner_cfg() -> RslRlTeacherKLRunnerCfg:
     obs_groups={
       "actor": ("actor",),
       "critic": ("critic",),
-      "teacher": ("teacher",),
+      "teacher": ("teacher", "camera"),
     },
     experiment_name="g1_blind_rough_teacherkl",
     save_interval=50,

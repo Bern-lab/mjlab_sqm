@@ -4,7 +4,7 @@ import pytest
 
 from mjlab.asset_zoo.robots import G1_ACTION_SCALE, GO1_ACTION_SCALE
 from mjlab.envs.mdp.actions import JointPositionActionCfg
-from mjlab.tasks.registry import list_tasks, load_env_cfg
+from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
   TeacherTargetHeadingVelocityCommandCfg,
@@ -222,3 +222,42 @@ def test_teacherkl_target_navigation_switch() -> None:
   assert "target_reached_bonus" in target_cfg.rewards
   assert "height_scan" not in target_cfg.observations["actor"].terms
   assert "toe_terrain_contact" in target_cfg.observations["critic"].terms
+
+
+def test_blind_rough_variants_share_toe_riser_contact_penalty() -> None:
+  """Blind-rough variants should use the shared toe-riser contact penalty config."""
+  for task_id in (
+    "Mjlab-Velocity-Blind-Rough-Unitree-G1",
+    "Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1",
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",
+  ):
+    cfg = load_env_cfg(task_id)
+    reward = cfg.rewards["toe_riser_contact_memory_penalty"]
+    assert reward.weight == -1.5
+    assert reward.params["sensor_name"] == "toe_terrain_contact"
+    assert reward.params["min_terrain_level"] == 3
+    assert reward.params["free_hits"] == 1
+    assert cfg.sim.contact_sensor_maxmatch == 256
+    assert "toe_terrain_contact" not in cfg.observations["actor"].terms
+    assert "toe_terrain_contact" in cfg.observations["critic"].terms
+    assert "toe_terrain_contact_forces" in cfg.observations["critic"].terms
+
+
+def test_teacherkl_uses_delayed_mean_huber_guidance() -> None:
+  """Teacher-KL variants should use delayed weak action-mean guidance."""
+  velocity_cfg = load_rl_cfg("Mjlab-Velocity-Blind-Rough-TeacherKL-Unitree-G1")
+  target_cfg = load_rl_cfg(
+    "Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1"
+  )
+
+  for cfg in (velocity_cfg, target_cfg):
+    teacher_cfg = cfg.algorithm.teacher_kl_cfg
+    assert cfg.obs_groups["teacher"] == ("teacher", "camera")
+    assert teacher_cfg.loss_type == "mean_huber"
+    assert teacher_cfg.lambda_start == 0.03
+    assert teacher_cfg.lambda_end == 0.005
+    assert teacher_cfg.warmup_iters == 1500
+    assert teacher_cfg.anneal_iters == 20000
+    assert teacher_cfg.huber_delta == 0.5
+    assert teacher_cfg.max_teacher_loss == 3.0
+    assert teacher_cfg.max_kl_loss is None

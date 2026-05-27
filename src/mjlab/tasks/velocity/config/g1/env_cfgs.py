@@ -36,6 +36,10 @@ from mjlab.terrains.primitive_terrains import (
 )
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
+from .blind_rough_toe_contact_cfg import (
+  configure_g1_toe_riser_contact_memory_penalty,
+)
+
 
 def _blind_rough_play_terrain_cfg():
   """Return a tougher blind-rough terrain set for visual play testing."""
@@ -424,13 +428,13 @@ def unitree_g1_blind_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.sim.nconmax = 256
   cfg.sim.njmax = 4096
   cfg.sim.mujoco.ccd_iterations = 50
-  cfg.sim.contact_sensor_maxmatch = 128
 
   # Keep terrain_scan in the scene for the privileged critic, but remove it
   # from the deployable actor so the policy does not require exteroception.
   del cfg.observations["actor"].terms["height_scan"]
+  configure_g1_toe_riser_contact_memory_penalty(cfg)
 
-  cfg.observations["actor"].history_length = 3
+  cfg.observations["actor"].history_length = 5
   cfg.observations["critic"].history_length = 3
 
   actor_terms = cfg.observations["actor"].terms
@@ -441,7 +445,7 @@ def unitree_g1_blind_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "joint_vel_rel",
   ):
     actor_terms[term_name].delay_min_lag = 0
-    actor_terms[term_name].delay_max_lag = 1
+    actor_terms[term_name].delay_max_lag = 2
     actor_terms[term_name].delay_hold_prob = 0.8
     actor_terms[term_name].delay_update_period = 5
 
@@ -463,19 +467,13 @@ def unitree_g1_blind_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       {
         "step": 0,
         "lin_vel_x": (-0.5, 0.8),
-        "lin_vel_y": (-0.7, 0.7),
+        "lin_vel_y": (-0.4, 0.4),
         "ang_vel_z": (-0.5, 0.5),
       },
       {
         "step": 3000 * 24,
-        "lin_vel_x": (-0.7, 1.0),
-        "lin_vel_y": (-0.7, 0.7),
-        "ang_vel_z": (-0.6, 0.6),
-      },
-      {
-        "step": 50000 * 24,
-        "lin_vel_x": (-1.0, 1.3),
-        "lin_vel_y": (-1.0, 1.0),
+        "lin_vel_x": (-0.8, 1.2),
+        "lin_vel_y": (-0.8, 0.8),
         "ang_vel_z": (-0.8, 0.8),
       },
     ]
@@ -546,8 +544,8 @@ def unitree_g1_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   if "command_vel" in cfg.curriculum:
     cfg.curriculum["command_vel"].params["velocity_stages"] = [
       {"step": 0, "lin_vel_x": (-1.0, 1.0), "ang_vel_z": (-0.5, 0.5)},
-      {"step": 5000 * 24, "lin_vel_x": (-1.5, 2.0), "ang_vel_z": (-0.7, 0.7)},
-      {"step": 10000 * 24, "lin_vel_x": (-2.0, 3.0)},
+      {"step": 3000 * 24, "lin_vel_x": (-1.5, 2.0), "ang_vel_z": (-0.7, 0.7)},
+      {"step": 6000 * 24, "lin_vel_x": (-2.0, 3.0)},
     ]
 
   if play:

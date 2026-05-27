@@ -87,24 +87,32 @@ class RslRlPpoAlgorithmCfg:
 
 @dataclass
 class RslRlTeacherKLCfg:
-  """Config for frozen-teacher KL regularization."""
+  """Config for frozen-teacher guidance regularization."""
 
   checkpoint_path: str | None = None
   """Path to the rsl-rl teacher checkpoint containing ``actor_state_dict``."""
+  loss_type: Literal["kl", "mean_mse", "mean_huber"] = "kl"
+  """Teacher guidance loss: full distribution KL, action-mean MSE, or action-mean Huber."""
   lambda_start: float = 0.8
-  """Initial weight for the teacher-KL loss."""
+  """Initial weight for the teacher guidance loss."""
   lambda_end: float = 0.0
-  """Final weight for the teacher-KL loss."""
+  """Final weight for the teacher guidance loss."""
   warmup_iters: int = 0
-  """Number of iterations with zero teacher-KL loss before the schedule starts."""
+  """Number of iterations with zero teacher guidance loss before the schedule starts."""
   constant_iters: int = 0
   """Number of iterations to hold ``lambda_start`` for constant_then_linear."""
   anneal_iters: int = 10000
   """Number of iterations used by linear/cosine annealing."""
   schedule: Literal["linear", "cosine", "constant", "constant_then_linear"] = "cosine"
-  """Teacher-KL weight schedule."""
+  """Teacher guidance weight schedule."""
+  huber_delta: float = 1.0
+  """Delta parameter for ``loss_type='mean_huber'``."""
+  max_teacher_loss: float | None = None
+  """Optional hard cap applied to mean-only teacher guidance losses."""
   max_kl_loss: float | None = 10.0
-  """Optional cap applied to the KL value used in the loss."""
+  """Optional cap applied to the KL value used in the loss when ``loss_type='kl'``."""
+  max_kl_loss_tail_slope: float = 0.0
+  """Slope to keep above ``max_kl_loss``. 0.0 keeps the existing hard cap."""
   check_shapes: bool = True
   """Whether to check teacher/student distribution parameter shapes once."""
   fail_on_nonfinite_kl: bool = True

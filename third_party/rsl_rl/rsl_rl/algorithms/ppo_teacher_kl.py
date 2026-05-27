@@ -11,6 +11,7 @@ import math
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from tensordict import TensorDict
 
 from rsl_rl.algorithms.ppo import PPO
@@ -22,7 +23,7 @@ from rsl_rl.utils import resolve_callable, resolve_obs_groups
 
 
 class PPOTeacherKL(PPO):
-    """PPO with an additional frozen-teacher KL regularization term."""
+    """PPO with an additional frozen-teacher guidance term."""
 
     teacher: MLPModel | None
     """The frozen teacher actor model."""
@@ -36,7 +37,7 @@ class PPOTeacherKL(PPO):
         teacher_checkpoint_path: str | None = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize PPO and store teacher-KL configuration."""
+        """Initialize PPO and store teacher-guidance configuration."""
         super().__init__(actor, critic, storage, **kwargs)
 
         self.teacher = None
@@ -55,15 +56,26 @@ class PPOTeacherKL(PPO):
         self.teacher_kl_anneal_iters = int(self.teacher_kl_cfg.get("anneal_iters", 3000))
         self.teacher_kl_schedule = str(self.teacher_kl_cfg.get("schedule", "linear"))
         self.teacher_kl_iteration = int(self.teacher_kl_cfg.get("iteration", 0))
+        self.teacher_guidance_loss_type = str(self.teacher_kl_cfg.get("loss_type", "kl"))
+        if self.teacher_guidance_loss_type not in {"kl", "mean_mse", "mean_huber"}:
+            raise ValueError(f"Unsupported teacher guidance loss_type: {self.teacher_guidance_loss_type}")
+        self.teacher_guidance_huber_delta = float(self.teacher_kl_cfg.get("huber_delta", 1.0))
+        if self.teacher_guidance_huber_delta <= 0.0:
+            raise ValueError("teacher_kl_cfg.huber_delta must be positive.")
+        max_teacher_loss = self.teacher_kl_cfg.get("max_teacher_loss", self.teacher_kl_cfg.get("max_loss"))
+        self.teacher_guidance_max_loss = None if max_teacher_loss is None else float(max_teacher_loss)
 
         self.teacher_kl_cfg.update(
             {
+                "loss_type": self.teacher_guidance_loss_type,
                 "lambda_start": self.teacher_kl_lambda_start,
                 "lambda_end": self.teacher_kl_lambda_end,
                 "warmup_iters": self.teacher_kl_warmup_iters,
                 "constant_iters": self.teacher_kl_constant_iters,
                 "anneal_iters": self.teacher_kl_anneal_iters,
                 "schedule": self.teacher_kl_schedule,
+                "huber_delta": self.teacher_guidance_huber_delta,
+                "max_teacher_loss": self.teacher_guidance_max_loss,
                 "log_kl_when_lambda_zero": self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True),
             }
         )
@@ -205,13 +217,83 @@ class PPOTeacherKL(PPO):
             value /= self.gpu_world_size
         return value
 
+    def _cap_mean_teacher_loss(self, teacher_loss: torch.Tensor) -> torch.Tensor:
+        """Apply the optional hard cap for mean-only teacher guidance losses."""
+        if self.teacher_guidance_max_loss is None:
+            return teacher_loss
+        return teacher_loss.clamp(max=self.teacher_guidance_max_loss)
+
+    def _compute_mean_teacher_loss(
+        self,
+        teacher_params: tuple[torch.Tensor, ...],
+        student_params: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute action-mean teacher guidance losses and diagnostics."""
+        teacher_mean = teacher_params[0]
+        student_mean = student_params[0]
+        if self.teacher_guidance_loss_type == "mean_mse":
+            mean_loss = (student_mean - teacher_mean).pow(2).sum(dim=-1).mean()
+            loss_key = "teacher_mean_mse"
+        elif self.teacher_guidance_loss_type == "mean_huber":
+            mean_loss = F.smooth_l1_loss(
+                student_mean,
+                teacher_mean,
+                beta=self.teacher_guidance_huber_delta,
+                reduction="none",
+            ).sum(dim=-1).mean()
+            loss_key = "teacher_mean_huber"
+        else:
+            raise ValueError(f"Mean teacher loss requested for loss_type={self.teacher_guidance_loss_type}")
+
+        mean_loss_for_update = self._cap_mean_teacher_loss(mean_loss)
+        action_mean_l2 = torch.linalg.vector_norm(student_mean.detach() - teacher_mean.detach(), dim=-1).mean()
+        teacher_kl = self.actor.get_kl_divergence(
+            teacher_params,
+            tuple(param.detach() for param in student_params),
+        ).mean()
+
+        return mean_loss_for_update, {
+            loss_key: mean_loss,
+            "teacher_loss_for_update": mean_loss_for_update,
+            "teacher_action_mean_l2": action_mean_l2,
+            "teacher_kl": teacher_kl,
+        }
+
+    def _compute_kl_teacher_loss(
+        self,
+        teacher_params: tuple[torch.Tensor, ...],
+        student_params: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute the legacy full-distribution teacher KL loss."""
+        teacher_kl = self.actor.get_kl_divergence(teacher_params, student_params).mean()
+
+        max_kl_loss = self.teacher_kl_cfg.get("max_kl_loss")
+        if max_kl_loss is not None:
+            max_kl_loss = float(max_kl_loss)
+            tail_slope = float(self.teacher_kl_cfg.get("max_kl_loss_tail_slope", 0.0))
+            if tail_slope > 0.0:
+                teacher_kl_for_loss = torch.where(
+                    teacher_kl <= max_kl_loss,
+                    teacher_kl,
+                    max_kl_loss + tail_slope * (teacher_kl - max_kl_loss),
+                )
+            else:
+                teacher_kl_for_loss = teacher_kl.clamp(max=max_kl_loss)
+        else:
+            teacher_kl_for_loss = teacher_kl
+
+        return teacher_kl_for_loss, {
+            "teacher_kl": teacher_kl,
+            "teacher_kl_for_loss": teacher_kl_for_loss,
+        }
+
     def _compute_additional_loss(
         self,
         batch: RolloutStorage.Batch,
         original_batch_size: int,
         distribution_params: tuple[torch.Tensor, ...],
     ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute the frozen-teacher KL regularization loss."""
+        """Compute the frozen-teacher guidance loss."""
         if self.teacher is None or not self.teacher_loaded:
             raise RuntimeError("Teacher KL loss requires a loaded teacher model.")
         if batch.observations is None:
@@ -220,9 +302,9 @@ class PPOTeacherKL(PPO):
         teacher_kl_lambda = self.get_teacher_kl_lambda()
         if teacher_kl_lambda == 0.0 and not self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True):
             return torch.zeros((), device=self.device), {
-                "teacher_kl": 0.0,
-                "teacher_kl_for_loss": 0.0,
-                "teacher_kl_loss": 0.0,
+                "teacher_loss": 0.0,
+                "teacher_loss_for_update": 0.0,
+                "teacher_lambda": 0.0,
                 "teacher_kl_lambda": 0.0,
             }
 
@@ -242,30 +324,49 @@ class PPOTeacherKL(PPO):
             self._validate_distribution_params(teacher_distribution_params, student_distribution_params)
             self._teacher_kl_shapes_checked = True
 
-        teacher_kl = self.actor.get_kl_divergence(teacher_distribution_params, student_distribution_params).mean()
-        if self.teacher_kl_cfg.get("fail_on_nonfinite_kl", True) and not torch.isfinite(teacher_kl):
-            raise FloatingPointError(
-                f"Non-finite teacher KL detected: {teacher_kl.item()}. "
-                "Check teacher observation normalization, action distribution parameters, and checkpoint compatibility."
+        if self.teacher_guidance_loss_type == "kl":
+            teacher_loss_for_update, loss_logs = self._compute_kl_teacher_loss(
+                teacher_distribution_params,
+                student_distribution_params,
+            )
+        else:
+            teacher_loss_for_update, loss_logs = self._compute_mean_teacher_loss(
+                teacher_distribution_params,
+                student_distribution_params,
             )
 
-        max_kl_loss = self.teacher_kl_cfg.get("max_kl_loss")
-        if max_kl_loss is not None:
-            teacher_kl_for_loss = teacher_kl.clamp(max=float(max_kl_loss))
-        else:
-            teacher_kl_for_loss = teacher_kl
+        raw_teacher_kl = loss_logs.get("teacher_kl")
+        if (
+            raw_teacher_kl is not None
+            and self.teacher_kl_cfg.get("fail_on_nonfinite_kl", True)
+            and not torch.isfinite(raw_teacher_kl)
+        ):
+            raise FloatingPointError(
+                f"Non-finite teacher KL detected: {raw_teacher_kl.item()}. "
+                "Check teacher observation normalization, action distribution parameters, and checkpoint compatibility."
+            )
+        if not torch.isfinite(teacher_loss_for_update):
+            raise FloatingPointError(
+                f"Non-finite teacher guidance loss detected: {teacher_loss_for_update.item()}."
+            )
 
-        teacher_kl_loss = teacher_kl_lambda * teacher_kl_for_loss
-        teacher_kl_log = self._distributed_mean_scalar(teacher_kl)
-        teacher_kl_for_loss_log = self._distributed_mean_scalar(teacher_kl_for_loss)
-        teacher_kl_loss_log = self._distributed_mean_scalar(teacher_kl_loss)
-
-        return teacher_kl_loss, {
-            "teacher_kl": teacher_kl_log.item(),
-            "teacher_kl_for_loss": teacher_kl_for_loss_log.item(),
-            "teacher_kl_loss": teacher_kl_loss_log.item(),
-            "teacher_kl_lambda": float(teacher_kl_lambda),
+        teacher_loss = teacher_kl_lambda * teacher_loss_for_update
+        loss_logs.setdefault("teacher_loss_for_update", teacher_loss_for_update)
+        log_dict = {
+            name: self._distributed_mean_scalar(value).item()
+            for name, value in loss_logs.items()
         }
+        teacher_loss_log = self._distributed_mean_scalar(teacher_loss).item()
+        log_dict.update(
+            {
+                "teacher_loss": teacher_loss_log,
+                "teacher_lambda": float(teacher_kl_lambda),
+                "teacher_kl_lambda": float(teacher_kl_lambda),
+            }
+        )
+        if self.teacher_guidance_loss_type == "kl":
+            log_dict["teacher_kl_loss"] = teacher_loss_log
+        return teacher_loss, log_dict
 
     def update(self) -> dict[str, float]:
         """Run a PPO update and advance the teacher-KL schedule."""
@@ -300,7 +401,7 @@ class PPOTeacherKL(PPO):
         self._freeze_teacher()
 
     @staticmethod
-    def construct_algorithm(obs: TensorDict, env: VecEnv, cfg: dict, device: str) -> "PPOTeacherKL":
+    def construct_algorithm(obs: TensorDict, env: VecEnv, cfg: dict, device: str) -> PPOTeacherKL:
         """Construct the PPO + teacher-KL algorithm."""
         algorithm_cfg = copy.deepcopy(cfg["algorithm"])
         actor_cfg = copy.deepcopy(cfg["actor"])

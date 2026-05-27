@@ -43,7 +43,7 @@ register_mjlab_task(
 )
 
 register_mjlab_task(
-  task_id="Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",#加target
+  task_id="Mjlab-Velocity-Blind-Rough-TargetNavigation-TeacherKL-Unitree-G1",#加target的普通kl
   env_cfg=unitree_g1_blind_rough_teacherkl_env_cfg(use_target_navigation=True),
   play_env_cfg=unitree_g1_blind_rough_teacherkl_env_cfg(
     play=True,

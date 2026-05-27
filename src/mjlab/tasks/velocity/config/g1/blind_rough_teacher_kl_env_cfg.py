@@ -6,8 +6,7 @@ from copy import deepcopy
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
-from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.sensor import ContactMatch, ContactSensorCfg
+from mjlab.sensor import CameraSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp.teacher_target_heading_command import (
   TeacherTargetHeadingVelocityCommandCfg,
@@ -24,6 +23,9 @@ from mjlab.terrains.primitive_terrains import (
 )
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
+from .blind_rough_toe_contact_cfg import (
+  configure_g1_toe_riser_contact_memory_penalty,
+)
 from .env_cfgs import (
   UniformVelocityCommandCfg,
   unitree_g1_rough_env_cfg,
@@ -41,39 +43,6 @@ TEACHER_OBSERVATION_ORDER = (
   "base_lin_vel",
   "foot_height",
 )
-
-_TOE_TERRAIN_CONTACT_SENSOR = "toe_terrain_contact"
-_G1_FOOT_BODY_NAMES = ("left_ankle_roll_link", "right_ankle_roll_link")
-
-
-def _g1_foot_body_cfg() -> SceneEntityCfg:
-  return SceneEntityCfg(
-    "robot",
-    body_names=_G1_FOOT_BODY_NAMES,
-    preserve_order=True,
-  )
-
-
-def _add_toe_terrain_contact_sensor(cfg: ManagerBasedRlEnvCfg) -> None:
-  sensor_names = {sensor.name for sensor in cfg.scene.sensors or ()}
-  if _TOE_TERRAIN_CONTACT_SENSOR in sensor_names:
-    return
-
-  toe_contact_cfg = ContactSensorCfg(
-    name=_TOE_TERRAIN_CONTACT_SENSOR,
-    primary=ContactMatch(
-      mode="subtree",
-      pattern=r"^(left_ankle_roll_link|right_ankle_roll_link)$",
-      entity="robot",
-    ),
-    secondary=ContactMatch(mode="body", pattern="terrain"),
-    fields=("found", "force", "pos", "normal", "tangent"),
-    reduce="maxforce",
-    num_slots=4,
-    global_frame=True,
-  )
-  cfg.scene.sensors = (cfg.scene.sensors or ()) + (toe_contact_cfg,)
-
 
 def _add_target_flat_patch_sampling(
   terrain_generator: TerrainGeneratorCfg,
@@ -138,20 +107,11 @@ def _configure_teacherkl_student_env(
   cfg.sim.nconmax = 256  # 5.9: 256
   cfg.sim.njmax = 4096  # 5.9: 4096; previous: 2048
   cfg.sim.mujoco.ccd_iterations = 50  # 5.9: 50; previous: 400
-  cfg.sim.contact_sensor_maxmatch = 256  # 5.9: 128; toe contact reward uses extra slots
-  _add_toe_terrain_contact_sensor(cfg)
 
   # Keep terrain_scan available for critic/teacher, but make the deployed
   # student actor blind.
   del cfg.observations["actor"].terms["height_scan"]
-  cfg.observations["critic"].terms["toe_terrain_contact"] = ObservationTermCfg(
-    func=mdp.foot_contact,
-    params={"sensor_name": _TOE_TERRAIN_CONTACT_SENSOR},
-  )
-  cfg.observations["critic"].terms["toe_terrain_contact_forces"] = ObservationTermCfg(
-    func=mdp.foot_contact_forces,
-    params={"sensor_name": _TOE_TERRAIN_CONTACT_SENSOR},
-  )
+  configure_g1_toe_riser_contact_memory_penalty(cfg)
 
   cfg.observations["actor"].history_length = 5  # 5.9: 3; previous: 5
   cfg.observations["critic"].history_length = 3  # 5.9: 3; previous: 1
@@ -184,13 +144,13 @@ def _configure_teacherkl_student_env(
     cfg.curriculum["command_vel"].params["velocity_stages"] = [
       {
         "step": 0,
-        "lin_vel_x": (-0.5, 0.8),
+        "lin_vel_x": (0.0, 0.8),
         "lin_vel_y": (0.0, 0.0),
         "ang_vel_z": (-0.5, 0.5),
       },
       {
         "step": 3000 * 24,
-        "lin_vel_x": (0.0, 1.2),
+        "lin_vel_x": (0.0, 1.0),
         "lin_vel_y": (0.0, 0.0),
         "ang_vel_z": (-0.8, 0.8),
       },
@@ -206,24 +166,6 @@ def _configure_teacherkl_student_env(
   )
   cfg.rewards["body_ang_vel"].weight = -0.08
   cfg.rewards["angular_momentum"].weight = -0.03
-  cfg.rewards["toe_riser_contact_memory_penalty"] = RewardTermCfg(
-    func=mdp.toe_riser_contact_memory_penalty,
-    weight=-1.0,
-    params={
-      "sensor_name": _TOE_TERRAIN_CONTACT_SENSOR,
-      "free_hits": 1,
-      "cooldown_time": 0.20,
-      "min_terrain_level": 3,
-      "min_ascent_height": 0.03,
-      "ascent_velocity_threshold": 0.03,
-      "toe_x_min": 0.08,
-      "vertical_normal_z_max": 0.4,
-      "forward_velocity_threshold": 0.05,
-      "force_threshold": 15.0,
-      "force_scale": 60.0,
-      "asset_cfg": _g1_foot_body_cfg(),
-    },
-  )
 
 
 def _configure_teacherkl_target_navigation(
@@ -237,7 +179,7 @@ def _configure_teacherkl_target_navigation(
 
   twist_cmd = TeacherTargetHeadingVelocityCommandCfg(
     entity_name="robot",
-    resampling_time_range=(7.0, 12.0),
+    resampling_time_range=(8.0, 13.0),
     heading_command=True,
     heading_control_stiffness=0.5,
     rel_target_envs=0.7,
@@ -312,6 +254,39 @@ def _make_teacher_terms(cfg: ManagerBasedRlEnvCfg) -> dict[str, ObservationTermC
   return terms
 
 
+def _add_teacher_depth_camera(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Add the depth camera observation expected by the frozen teacher."""
+  sensors = tuple(cfg.scene.sensors or ())
+  if not any(getattr(sensor, "name", None) == "front_depth" for sensor in sensors):
+    cfg.scene.sensors = sensors + (
+      CameraSensorCfg(
+        name="front_depth",
+        parent_body="robot/torso_link",
+        pos=(0.10, 0.0, 0.45),
+        quat=(0.95371695, 0.0, -0.30070580, 0.0),
+        fovy=80.0,
+        width=64,
+        height=64,
+        data_types=("depth",),
+        enabled_geom_groups=(0, 2, 3),
+        use_shadows=False,
+        use_textures=True,
+      ),
+    )
+
+  cfg.observations["camera"] = ObservationGroupCfg(
+    terms={
+      "front_depth": ObservationTermCfg(
+        func=mdp.camera_depth,
+        params={"sensor_name": "front_depth", "cutoff_distance": 5.0},
+      ),
+    },
+    enable_corruption=False,
+    concatenate_terms=True,
+    concatenate_dim=0,
+  )
+
+
 def unitree_g1_blind_rough_teacherkl_env_cfg(
   play: bool = False,
   use_target_navigation: bool = False,
@@ -326,6 +301,7 @@ def unitree_g1_blind_rough_teacherkl_env_cfg(
   """
   cfg = unitree_g1_rough_env_cfg(play=play)
   _configure_teacherkl_student_env(cfg, play=play)
+  _add_teacher_depth_camera(cfg)
   if use_target_navigation:
     _configure_teacherkl_target_navigation(cfg, play=play)
 
