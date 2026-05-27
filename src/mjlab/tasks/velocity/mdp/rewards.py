@@ -25,9 +25,25 @@ if TYPE_CHECKING:
 
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+_DEFAULT_FOOT_BODY_CFG = SceneEntityCfg(
+  "robot", body_names=("left_ankle_roll_link", "right_ankle_roll_link")
+)
 _DEFAULT_FOOT_SITE_CFG = SceneEntityCfg(
   "robot", site_names=("left_foot", "right_foot")
 )
+
+
+def _terrain_level_active(
+  env: ManagerBasedRlEnv, min_terrain_level: int | None
+) -> torch.Tensor:
+  if min_terrain_level is None:
+    return torch.ones(env.num_envs, device=env.device, dtype=torch.bool)
+
+  terrain = getattr(env.scene, "terrain", None)
+  levels = getattr(terrain, "terrain_levels", None)
+  if levels is None:
+    return torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+  return levels >= min_terrain_level
 
 
 def track_linear_velocity(
@@ -397,6 +413,200 @@ def soft_landing(
       active = (total_command > command_threshold).float()
       cost = cost * active
   return cost
+
+
+class toe_riser_contact_memory_penalty:
+  """Penalize repeated toe impacts against vertical riser-like terrain contacts.
+
+  The detector uses only contact data and proprioceptive kinematics. It does not
+  read step-boundary geometry, height scans, or terrain type names.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    asset_cfg = cfg.params.get("asset_cfg", _DEFAULT_FOOT_BODY_CFG)
+    num_feet = len(asset_cfg.body_ids) if isinstance(asset_cfg.body_ids, list) else 2
+    self._toe_hit_count = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.float32
+    )
+    self._toe_hit_cooldown = torch.zeros(
+      (env.num_envs, num_feet), device=env.device, dtype=torch.float32
+    )
+    self._root_z_baseline = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.float32
+    )
+    self._max_root_z = torch.zeros(
+      env.num_envs, device=env.device, dtype=torch.float32
+    )
+    self._ascent_active = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+    self._needs_root_z_init = torch.ones(
+      env.num_envs, device=env.device, dtype=torch.bool
+    )
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self._toe_hit_count[env_ids] = 0.0
+    self._toe_hit_cooldown[env_ids] = 0.0
+    self._root_z_baseline[env_ids] = 0.0
+    self._max_root_z[env_ids] = 0.0
+    self._ascent_active[env_ids] = False
+    self._needs_root_z_init[env_ids] = True
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    free_hits: int = 1,
+    cooldown_time: float = 0.20,
+    min_terrain_level: int = 3,
+    min_ascent_height: float = 0.03,
+    ascent_velocity_threshold: float = 0.03,
+    toe_x_min: float = 0.08,
+    vertical_normal_z_max: float = 0.4,
+    forward_velocity_threshold: float = 0.05,
+    force_threshold: float = 15.0,
+    force_scale: float = 60.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_FOOT_BODY_CFG,
+  ) -> torch.Tensor:
+    sensor = env.scene[sensor_name]
+    assert isinstance(sensor, ContactSensor), (
+      f"toe_riser_contact_memory_penalty requires a ContactSensor, got "
+      f"{type(sensor).__name__}"
+    )
+    data = sensor.data
+    assert data.found is not None
+    assert data.force is not None
+    assert data.normal is not None
+    assert data.pos is not None
+
+    asset: Entity = env.scene[asset_cfg.name]
+    root_z = asset.data.root_link_pos_w[:, 2]
+    needs_init = self._needs_root_z_init
+    self._root_z_baseline = torch.where(needs_init, root_z, self._root_z_baseline)
+    self._max_root_z = torch.where(needs_init, root_z, self._max_root_z)
+    self._needs_root_z_init[:] = False
+
+    self._max_root_z = torch.maximum(self._max_root_z, root_z)
+    root_z_gain = self._max_root_z - self._root_z_baseline
+    root_vz = asset.data.root_link_lin_vel_w[:, 2]
+    ascent_observed = (root_z_gain >= min_ascent_height) | (
+      root_vz > ascent_velocity_threshold
+    )
+
+    terrain_level_active = _terrain_level_active(env, min_terrain_level)
+    self._ascent_active |= terrain_level_active & ascent_observed
+    active_gate = terrain_level_active & self._ascent_active
+
+    inactive = ~active_gate
+    if bool(torch.any(inactive).item()):
+      self._toe_hit_count[inactive] = 0.0
+      self._toe_hit_cooldown[inactive] = 0.0
+
+    self._toe_hit_cooldown = torch.clamp(
+      self._toe_hit_cooldown - env.step_dt, min=0.0
+    )
+
+    num_envs = env.num_envs
+    num_feet = len(asset_cfg.body_ids) if isinstance(asset_cfg.body_ids, list) else 2
+    num_contacts = data.found.shape[1]
+    assert num_contacts % num_feet == 0, (
+      f"Contact sensor '{sensor_name}' has {num_contacts} contact slots, which is "
+      f"not divisible by {num_feet} feet"
+    )
+    num_slots = num_contacts // num_feet
+
+    found = data.found.view(num_envs, num_feet, num_slots) > 0
+    force_w = data.force.view(num_envs, num_feet, num_slots, 3)
+    normal_w = data.normal.view(num_envs, num_feet, num_slots, 3)
+    contact_pos_w = data.pos.view(num_envs, num_feet, num_slots, 3)
+
+    foot_pos_w = asset.data.body_link_pos_w[:, asset_cfg.body_ids, :]
+    foot_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+    foot_vel_w = asset.data.body_link_lin_vel_w[:, asset_cfg.body_ids, :]
+
+    expanded_quat = foot_quat_w[:, :, None, :].expand(
+      num_envs, num_feet, num_slots, 4
+    )
+    contact_pos_b = quat_apply_inverse(
+      expanded_quat,
+      contact_pos_w - foot_pos_w[:, :, None, :],
+    )
+    is_toe_contact = contact_pos_b[..., 0] >= toe_x_min
+
+    local_forward = torch.tensor(
+      (1.0, 0.0, 0.0), device=env.device, dtype=torch.float32
+    )
+    local_forward = local_forward.view(1, 1, 3).expand(num_envs, num_feet, 3)
+    foot_forward_w = quat_apply(foot_quat_w, local_forward)
+    foot_forward_xy = foot_forward_w[..., :2]
+    foot_forward_xy = foot_forward_xy / torch.clamp(
+      torch.norm(foot_forward_xy, dim=-1, keepdim=True), min=1e-6
+    )
+
+    foot_forward_vel = torch.sum(foot_vel_w[..., :2] * foot_forward_xy, dim=-1)
+    is_forward_sweep = foot_forward_vel[:, :, None] > forward_velocity_threshold
+
+    is_vertical_face = torch.abs(normal_w[..., 2]) < vertical_normal_z_max
+    force_dot_forward = torch.sum(
+      force_w[..., :2] * foot_forward_xy[:, :, None, :], dim=-1
+    )
+    blocking_force = torch.relu(-force_dot_forward)
+    hit_strength = torch.clamp(
+      (blocking_force - force_threshold) / force_scale,
+      min=0.0,
+      max=1.0,
+    )
+
+    toe_riser_hit = (
+      found
+      & is_toe_contact
+      & is_vertical_face
+      & is_forward_sweep
+      & (hit_strength > 0.0)
+    )
+    hit_by_foot = torch.any(toe_riser_hit, dim=-1)
+    new_hit_by_foot = (
+      hit_by_foot
+      & active_gate[:, None]
+      & (self._toe_hit_cooldown <= 0.0)
+    )
+
+    if bool(torch.any(new_hit_by_foot).item()):
+      self._toe_hit_cooldown = torch.where(
+        new_hit_by_foot,
+        torch.full_like(self._toe_hit_cooldown, cooldown_time),
+        self._toe_hit_cooldown,
+      )
+
+    new_hit_env = torch.any(new_hit_by_foot, dim=-1)
+    self._toe_hit_count += new_hit_env.float()
+
+    per_foot_strength = torch.max(
+      torch.where(toe_riser_hit, hit_strength, torch.zeros_like(hit_strength)),
+      dim=-1,
+    ).values
+    env_hit_strength = torch.max(
+      torch.where(
+        new_hit_by_foot,
+        per_foot_strength,
+        torch.zeros_like(per_foot_strength),
+      ),
+      dim=-1,
+    ).values
+    penalize = new_hit_env & (self._toe_hit_count > float(free_hits))
+    penalty = penalize.float() * env_hit_strength
+
+    env.extras["log"]["Metrics/toe_riser_contact_active_ratio"] = (
+      active_gate.float().mean()
+    )
+    env.extras["log"]["Metrics/toe_riser_contact_new_hit_ratio"] = (
+      new_hit_env.float().mean()
+    )
+    env.extras["log"]["Metrics/toe_riser_contact_penalty_mean"] = penalty.mean()
+    env.extras["log"]["Metrics/toe_riser_contact_hit_count_mean"] = (
+      self._toe_hit_count.mean()
+    )
+    return penalty
 
 
 class variable_posture:

@@ -54,6 +54,8 @@ class EvalPolicyConfig:
   output_root: str = "eval_outputs/velocity"
   output_dir: str | None = None
   output_file: str | None = None
+  write_table_image: bool = True
+  table_image_file: str | None = None
   clean_observations: bool = True
   disable_observation_delay: bool = True
   disable_actuator_delay: bool = True
@@ -230,6 +232,14 @@ def _resolve_output_path(
 ) -> Path | None:
   if cfg.output_file is not None:
     output_path = Path(cfg.output_file)
+    if output_path.is_dir() or output_path.suffix.lower() != ".json":
+      output_dir = make_timestamped_policy_output_dir(
+        output_root=output_path,
+        task_id=task_id,
+        agent_cfg=agent_cfg,
+        checkpoint_path=checkpoint_path,
+      )
+      return output_dir / f"eval_{cfg.terrain_set}.json"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     return output_path
 
@@ -245,6 +255,149 @@ def _resolve_output_path(
   )
   output_dir.mkdir(parents=True, exist_ok=True)
   return output_dir / f"eval_{cfg.terrain_set}.json"
+
+
+def _resolve_table_image_path(
+  *,
+  cfg: EvalPolicyConfig,
+  output_path: Path | None,
+) -> Path | None:
+  if cfg.table_image_file is not None:
+    table_path = Path(cfg.table_image_file)
+    table_path.parent.mkdir(parents=True, exist_ok=True)
+    return table_path
+  if not cfg.write_table_image or output_path is None:
+    return None
+  return output_path.with_name(f"{output_path.stem}_table.png")
+
+
+def _metric_cell_color(column_name: str, value: float) -> str:
+  if column_name == "success %":
+    if value >= 90.0:
+      return "#d8f0dd"
+    if value >= 70.0:
+      return "#fff0c2"
+    return "#f7d4d4"
+  if column_name == "fall %":
+    return "#f7d4d4" if value > 0.0 else "#f3f6f8"
+  if column_name in {"toe", "heel", "lip"}:
+    if value <= 0.0:
+      return "#f3f6f8"
+    if value <= 5.0:
+      return "#fff0c2"
+    return "#f7d4d4"
+  return "#ffffff"
+
+
+def _write_summary_table_image(payload: dict, output_path: Path) -> None:
+  import matplotlib
+
+  matplotlib.use("Agg")
+  import matplotlib.pyplot as plt
+
+  columns = [
+    "terrain",
+    "success %",
+    "fall %",
+    "len s",
+    "track err",
+    "toe",
+    "heel",
+    "lip",
+    "pitch/roll",
+    "torque",
+  ]
+  numeric_rows: list[list[float | str]] = []
+  text_rows: list[list[str]] = []
+  for item in payload["terrains"]:
+    row_values: list[float | str] = [
+      item["terrain"],
+      item["success_rate"] * 100.0,
+      item["fall_rate"] * 100.0,
+      item["mean_episode_length_s"],
+      item["tracking_error"],
+      item["toe_riser_collision_count"],
+      item["heel_riser_collision_count"],
+      item["foot_lip_collision_count"],
+      item["base_pitch_roll_rms"],
+      item["torque_cost"],
+    ]
+    numeric_rows.append(row_values)
+    text_rows.append(
+      [
+        str(row_values[0]),
+        f"{row_values[1]:.0f}",
+        f"{row_values[2]:.0f}",
+        f"{row_values[3]:.2f}",
+        f"{row_values[4]:.3f}",
+        f"{row_values[5]:.2f}",
+        f"{row_values[6]:.2f}",
+        f"{row_values[7]:.2f}",
+        f"{row_values[8]:.3f}",
+        f"{row_values[9]:.3f}",
+      ]
+    )
+
+  fig_height = max(2.8, 1.35 + 0.42 * max(1, len(text_rows)))
+  fig, ax = plt.subplots(figsize=(13.0, fig_height), dpi=180)
+  ax.axis("off")
+  command = payload.get("command", {})
+  title = (
+    f"{payload.get('policy_output_name', payload.get('task_id', 'policy'))} | "
+    f"{payload.get('terrain_set', 'terrain_set')} | "
+    f"{payload.get('episodes_per_terrain', '?')} eps/terrain | "
+    f"vx={command.get('vx', '?')}, vy={command.get('vy', '?')}, wz={command.get('wz', '?')}"
+  )
+  ax.text(
+    0.5,
+    0.96,
+    title,
+    ha="center",
+    va="center",
+    fontsize=11,
+    fontweight="bold",
+    transform=ax.transAxes,
+  )
+
+  table = ax.table(
+    cellText=text_rows,
+    colLabels=columns,
+    cellLoc="center",
+    loc="center",
+  )
+  table.auto_set_font_size(False)
+  table.set_fontsize(8.5)
+  table.scale(1.0, 1.35)
+
+  for (row_idx, col_idx), cell in table.get_celld().items():
+    cell.set_edgecolor("#cfd6de")
+    cell.set_linewidth(0.7)
+    if row_idx == 0:
+      cell.set_facecolor("#243447")
+      cell.set_text_props(color="white", fontweight="bold")
+      continue
+    if col_idx == 0:
+      cell.set_facecolor("#eef2f5")
+      cell.set_text_props(ha="left", fontweight="bold")
+      continue
+    value = float(numeric_rows[row_idx - 1][col_idx])
+    cell.set_facecolor(_metric_cell_color(columns[col_idx], value))
+
+  footer = "Collision columns are mean event counts per episode. Lower tracking, collision, pitch/roll, and torque are better."
+  ax.text(
+    0.5,
+    0.04,
+    footer,
+    ha="center",
+    va="center",
+    fontsize=8,
+    color="#4d5b68",
+    transform=ax.transAxes,
+  )
+  fig.tight_layout()
+  output_path.parent.mkdir(parents=True, exist_ok=True)
+  fig.savefig(output_path, bbox_inches="tight")
+  plt.close(fig)
 
 
 def run_eval_policy(task_id: str, cfg: EvalPolicyConfig) -> dict:
@@ -323,6 +476,10 @@ def run_eval_policy(task_id: str, cfg: EvalPolicyConfig) -> dict:
   if output_path is not None:
     output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"[INFO] Wrote evaluation results to {output_path}")
+  table_image_path = _resolve_table_image_path(cfg=cfg, output_path=output_path)
+  if table_image_path is not None:
+    _write_summary_table_image(payload, table_image_path)
+    print(f"[INFO] Wrote evaluation table image to {table_image_path}")
 
   return payload
 

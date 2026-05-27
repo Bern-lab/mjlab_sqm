@@ -14,6 +14,9 @@ from mjlab.terrains.primitive_terrains import (
 )
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
+from .blind_rough_toe_contact_cfg import (
+  configure_g1_toe_riser_contact_memory_penalty,
+)
 from .env_cfgs import (
   UniformVelocityCommandCfg,
   unitree_g1_rough_env_cfg,
@@ -89,6 +92,7 @@ def _configure_lstm_teacherkl_student_env(
   # Keep terrain_scan available for critic/teacher, but make the deployed
   # student actor blind.
   del cfg.observations["actor"].terms["height_scan"]
+  configure_g1_toe_riser_contact_memory_penalty(cfg)
 
   cfg.observations["actor"].history_length = 5
   cfg.observations["critic"].history_length = 3

@@ -31,6 +31,9 @@ from mjlab.terrains.primitive_terrains import (
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 
 from .blind_rough_teacher_kl_env_cfg import unitree_g1_blind_rough_teacherkl_env_cfg
+from .blind_rough_toe_contact_cfg import (
+  configure_g1_toe_riser_contact_memory_penalty,
+)
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 _STAIR_TERRAIN_NAMES = ("pyramid_stairs", "pyramid_stairs_inv")
@@ -275,6 +278,7 @@ def unitree_g1_blind_stairs_flag_teacherkl_env_cfg(
 
   cfg.observations["actor"].history_length = actor_history_length
   cfg.observations["critic"].history_length = critic_history_length
+  configure_g1_toe_riser_contact_memory_penalty(cfg)
 
   assert cfg.scene.terrain is not None
   cfg.scene.terrain.terrain_generator = (

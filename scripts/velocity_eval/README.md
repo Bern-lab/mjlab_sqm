@@ -63,6 +63,12 @@ The JSON output includes:
 - `foot_clearance`
 - collision counts by stair level
 
+The evaluator also writes a compact PNG table next to the JSON by default:
+
+```text
+eval_outputs/velocity/g1_blind_rough_teacherkl/0526_143012/eval_eval_v1_table.png
+```
+
 If `--output-file` is omitted, each evaluation run creates a folder grouped by
 the trained policy family and then by timestamp, for example:
 
