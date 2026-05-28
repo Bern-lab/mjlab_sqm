@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import math
 import torch
+import torch.nn.functional as functional
 from tensordict import TensorDict
 from typing import Any
 
@@ -21,7 +22,7 @@ from rsl_rl.utils import resolve_callable, resolve_obs_groups
 
 
 class PPOTeacherKL(PPO):
-    """PPO with an additional frozen-teacher KL regularization term."""
+    """PPO with an additional frozen-teacher guidance term."""
 
     teacher: MLPModel | None
     """The frozen teacher actor model."""
@@ -35,13 +36,20 @@ class PPOTeacherKL(PPO):
         teacher_checkpoint_path: str | None = None,
         **kwargs: Any,
     ) -> None:
-        """Initialize PPO and store teacher-KL configuration."""
+        """Initialize PPO and store teacher-guidance configuration."""
         super().__init__(actor, critic, storage, **kwargs)
 
         self.teacher = None
         self.teacher_loaded = False
         self.teacher_kl_cfg = dict(teacher_kl_cfg or {})
         self._teacher_kl_shapes_checked = False
+        self.teacher_guidance_enabled = bool(self.teacher_kl_cfg.get("enabled", True))
+        self.teacher_imitation_only = bool(self.teacher_kl_cfg.get("imitation_only", False))
+        if self.teacher_imitation_only and not self.teacher_guidance_enabled:
+            raise ValueError("teacher_kl_cfg.imitation_only requires enabled=True.")
+        self.teacher_imitation_loss_coef = float(self.teacher_kl_cfg.get("imitation_loss_coef", 1.0))
+        if self.teacher_imitation_loss_coef <= 0.0:
+            raise ValueError("teacher_kl_cfg.imitation_loss_coef must be positive.")
 
         # Allow checkpoint path to be supplied either inside teacher_kl_cfg or as a direct keyword.
         self.teacher_checkpoint_path: str | None = None
@@ -54,15 +62,29 @@ class PPOTeacherKL(PPO):
         self.teacher_kl_anneal_iters = int(self.teacher_kl_cfg.get("anneal_iters", 3000))
         self.teacher_kl_schedule = str(self.teacher_kl_cfg.get("schedule", "linear"))
         self.teacher_kl_iteration = int(self.teacher_kl_cfg.get("iteration", 0))
+        self.teacher_guidance_loss_type = str(self.teacher_kl_cfg.get("loss_type", "kl"))
+        if self.teacher_guidance_loss_type not in {"kl", "mean_mse", "mean_huber"}:
+            raise ValueError(f"Unsupported teacher guidance loss_type: {self.teacher_guidance_loss_type}")
+        self.teacher_guidance_huber_delta = float(self.teacher_kl_cfg.get("huber_delta", 1.0))
+        if self.teacher_guidance_huber_delta <= 0.0:
+            raise ValueError("teacher_kl_cfg.huber_delta must be positive.")
+        max_teacher_loss = self.teacher_kl_cfg.get("max_teacher_loss", self.teacher_kl_cfg.get("max_loss"))
+        self.teacher_guidance_max_loss = None if max_teacher_loss is None else float(max_teacher_loss)
 
         self.teacher_kl_cfg.update(
             {
+                "enabled": self.teacher_guidance_enabled,
+                "imitation_only": self.teacher_imitation_only,
+                "imitation_loss_coef": self.teacher_imitation_loss_coef,
+                "loss_type": self.teacher_guidance_loss_type,
                 "lambda_start": self.teacher_kl_lambda_start,
                 "lambda_end": self.teacher_kl_lambda_end,
                 "warmup_iters": self.teacher_kl_warmup_iters,
                 "constant_iters": self.teacher_kl_constant_iters,
                 "anneal_iters": self.teacher_kl_anneal_iters,
                 "schedule": self.teacher_kl_schedule,
+                "huber_delta": self.teacher_guidance_huber_delta,
+                "max_teacher_loss": self.teacher_guidance_max_loss,
                 "log_kl_when_lambda_zero": self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True),
             }
         )
@@ -204,79 +226,55 @@ class PPOTeacherKL(PPO):
             value /= self.gpu_world_size
         return value
 
-    def act(self, obs: TensorDict) -> torch.Tensor:
-        """Sample student actions and store frozen-teacher distribution params.
+    def _cap_mean_teacher_loss(self, teacher_loss: torch.Tensor) -> torch.Tensor:
+        """Apply the optional hard cap for mean-only teacher guidance losses."""
+        if self.teacher_guidance_max_loss is None:
+            return teacher_loss
+        return teacher_loss.clamp(max=self.teacher_guidance_max_loss)
 
-        The teacher may use large privileged observations such as depth images.
-        We compute its distribution once during rollout and store only the compact
-        distribution parameters, so recurrent student updates do not keep
-        teacher-only camera frames in rollout storage or rerun the teacher CNN
-        for every PPO epoch.
-        """
-        actions = super().act(obs)
-
-        if self.teacher is None or not self.teacher_loaded:
-            raise RuntimeError("Teacher KL rollout requires a loaded teacher model.")
-
-        with torch.no_grad():
-            self.teacher(obs, stochastic_output=True)
-            self.transition.teacher_distribution_params = tuple(
-                p.detach() for p in self.teacher.output_distribution_params
-            )
-
-        storage_obs_groups = list(self.storage.observations.keys())
-        self.transition.observations = obs.select(*storage_obs_groups)
-        return actions
-
-    def _compute_additional_loss(
+    def _compute_mean_teacher_loss(
         self,
-        batch: RolloutStorage.Batch,
-        original_batch_size: int,
-        distribution_params: tuple[torch.Tensor, ...],
-    ) -> tuple[torch.Tensor, dict[str, float]]:
-        """Compute the frozen-teacher KL regularization loss."""
-        if self.teacher is None or not self.teacher_loaded:
-            raise RuntimeError("Teacher KL loss requires a loaded teacher model.")
-        if batch.observations is None:
-            raise RuntimeError("Teacher KL loss requires observations in the rollout batch.")
-
-        teacher_kl_lambda = self.get_teacher_kl_lambda()
-        if teacher_kl_lambda == 0.0 and not self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True):
-            return torch.zeros((), device=self.device), {
-                "teacher_kl": 0.0,
-                "teacher_kl_for_loss": 0.0,
-                "teacher_kl_loss": 0.0,
-                "teacher_kl_lambda": 0.0,
-            }
-
-        observations = batch.observations
-        if batch.teacher_distribution_params is not None:
-            # Rollout collection runs under torch.inference_mode(), and these
-            # cached teacher params are used in an autograd-tracked KL loss.
-            # Clone them during update so autograd can save the constants.
-            teacher_distribution_params = tuple(p.detach().clone() for p in batch.teacher_distribution_params)
+        teacher_params: tuple[torch.Tensor, ...],
+        student_params: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute action-mean teacher guidance losses and diagnostics."""
+        teacher_mean = teacher_params[0]
+        student_mean = student_params[0]
+        if self.teacher_guidance_loss_type == "mean_mse":
+            mean_loss = (student_mean - teacher_mean).pow(2).sum(dim=-1).mean()
+            loss_key = "teacher_mean_mse"
+        elif self.teacher_guidance_loss_type == "mean_huber":
+            mean_loss = functional.smooth_l1_loss(
+                student_mean,
+                teacher_mean,
+                beta=self.teacher_guidance_huber_delta,
+                reduction="none",
+            ).sum(dim=-1).mean()
+            loss_key = "teacher_mean_huber"
         else:
-            teacher_observations = observations[:original_batch_size]
-            teacher_masks = batch.masks[:original_batch_size] if batch.masks is not None else None
+            raise ValueError(f"Mean teacher loss requested for loss_type={self.teacher_guidance_loss_type}")
 
-            with torch.no_grad():
-                self.teacher(teacher_observations, masks=teacher_masks, stochastic_output=True)
-                teacher_distribution_params = tuple(p.detach() for p in self.teacher.output_distribution_params)
+        mean_loss_for_update = self._cap_mean_teacher_loss(mean_loss)
+        action_mean_l2 = torch.linalg.vector_norm(student_mean.detach() - teacher_mean.detach(), dim=-1).mean()
+        teacher_kl = self.actor.get_kl_divergence(
+            teacher_params,
+            tuple(param.detach() for param in student_params),
+        ).mean()
 
-        student_distribution_params = distribution_params
-        if teacher_kl_lambda == 0.0:
-            student_distribution_params = tuple(p.detach() for p in student_distribution_params)
+        return mean_loss_for_update, {
+            loss_key: mean_loss,
+            "teacher_loss_for_update": mean_loss_for_update,
+            "teacher_action_mean_l2": action_mean_l2,
+            "teacher_kl": teacher_kl,
+        }
 
-        if self.teacher_kl_cfg.get("check_shapes", True) and not self._teacher_kl_shapes_checked:
-            self._validate_distribution_params(teacher_distribution_params, student_distribution_params)
-            self._teacher_kl_shapes_checked = True
-
-        teacher_kl = self.actor.get_kl_divergence(teacher_distribution_params, student_distribution_params).mean()
-        if self.teacher_kl_cfg.get("fail_on_nonfinite_kl", True) and not torch.isfinite(teacher_kl):
-            raise FloatingPointError(
-                f"Non-finite teacher KL detected: {teacher_kl.item()}. "
-                "Check teacher observation normalization, action distribution parameters, and checkpoint compatibility."
-            )
+    def _compute_kl_teacher_loss(
+        self,
+        teacher_params: tuple[torch.Tensor, ...],
+        student_params: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute the legacy full-distribution teacher KL loss."""
+        teacher_kl = self.actor.get_kl_divergence(teacher_params, student_params).mean()
 
         max_kl_loss = self.teacher_kl_cfg.get("max_kl_loss")
         if max_kl_loss is not None:
@@ -293,22 +291,225 @@ class PPOTeacherKL(PPO):
         else:
             teacher_kl_for_loss = teacher_kl
 
-        teacher_kl_loss = teacher_kl_lambda * teacher_kl_for_loss
-        teacher_kl_log = self._distributed_mean_scalar(teacher_kl)
-        teacher_kl_for_loss_log = self._distributed_mean_scalar(teacher_kl_for_loss)
-        teacher_kl_loss_log = self._distributed_mean_scalar(teacher_kl_loss)
-
-        return teacher_kl_loss, {
-            "teacher_kl": teacher_kl_log.item(),
-            "teacher_kl_for_loss": teacher_kl_for_loss_log.item(),
-            "teacher_kl_loss": teacher_kl_loss_log.item(),
-            "teacher_kl_lambda": float(teacher_kl_lambda),
+        return teacher_kl_for_loss, {
+            "teacher_kl": teacher_kl,
+            "teacher_kl_for_loss": teacher_kl_for_loss,
         }
+
+    def act(self, obs: TensorDict) -> torch.Tensor:
+        """Sample student actions and store frozen-teacher distribution params.
+
+        The teacher may use large privileged observations such as depth images.
+        We compute its distribution once during rollout and store only the compact
+        distribution parameters, so recurrent student updates do not keep
+        teacher-only camera frames in rollout storage or rerun the teacher CNN
+        for every PPO epoch.
+        """
+        actions = super().act(obs)
+        storage_obs_groups = list(self.storage.observations.keys())
+        self.transition.observations = obs.select(*storage_obs_groups)
+
+        if not self.teacher_guidance_enabled:
+            return actions
+        if self.teacher is None or not self.teacher_loaded:
+            raise RuntimeError("Teacher guidance rollout requires a loaded teacher model.")
+
+        with torch.no_grad():
+            self.teacher(obs, stochastic_output=True)
+            self.transition.teacher_distribution_params = tuple(
+                p.detach() for p in self.teacher.output_distribution_params
+            )
+
+        return actions
+
+    def _compute_additional_loss(
+        self,
+        batch: RolloutStorage.Batch,
+        original_batch_size: int,
+        distribution_params: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute the frozen-teacher guidance loss."""
+        if not self.teacher_guidance_enabled:
+            return torch.zeros((), device=self.device), {
+                "teacher_loss": 0.0,
+                "teacher_loss_for_update": 0.0,
+                "teacher_lambda": 0.0,
+                "teacher_kl_lambda": 0.0,
+                "teacher_guidance_enabled": 0.0,
+            }
+
+        if self.teacher is None or not self.teacher_loaded:
+            raise RuntimeError("Teacher guidance loss requires a loaded teacher model.")
+        if batch.observations is None:
+            raise RuntimeError("Teacher guidance loss requires observations in the rollout batch.")
+
+        teacher_kl_lambda = self.get_teacher_kl_lambda()
+        if teacher_kl_lambda == 0.0 and not self.teacher_kl_cfg.get("log_kl_when_lambda_zero", True):
+            return torch.zeros((), device=self.device), {
+                "teacher_loss": 0.0,
+                "teacher_loss_for_update": 0.0,
+                "teacher_lambda": 0.0,
+                "teacher_kl_lambda": 0.0,
+            }
+
+        return self._compute_teacher_guidance_loss(
+            batch,
+            original_batch_size,
+            distribution_params,
+            loss_weight=teacher_kl_lambda,
+        )
+
+    def _compute_teacher_guidance_loss(
+        self,
+        batch: RolloutStorage.Batch,
+        original_batch_size: int,
+        distribution_params: tuple[torch.Tensor, ...],
+        loss_weight: float,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute teacher guidance loss with an explicit scalar weight."""
+        if self.teacher is None or not self.teacher_loaded:
+            raise RuntimeError("Teacher guidance loss requires a loaded teacher model.")
+        if batch.observations is None:
+            raise RuntimeError("Teacher guidance loss requires observations in the rollout batch.")
+
+        observations = batch.observations
+        if batch.teacher_distribution_params is not None:
+            # Rollout collection runs under torch.inference_mode(), and these
+            # cached teacher params are used in an autograd-tracked guidance loss.
+            # Clone them during update so autograd can save the constants.
+            teacher_distribution_params = tuple(p.detach().clone() for p in batch.teacher_distribution_params)
+        else:
+            teacher_observations = observations[:original_batch_size]
+            teacher_masks = batch.masks[:original_batch_size] if batch.masks is not None else None
+
+            with torch.no_grad():
+                self.teacher(teacher_observations, masks=teacher_masks, stochastic_output=True)
+                teacher_distribution_params = tuple(p.detach() for p in self.teacher.output_distribution_params)
+
+        student_distribution_params = distribution_params
+        if loss_weight == 0.0:
+            student_distribution_params = tuple(p.detach() for p in student_distribution_params)
+
+        if self.teacher_kl_cfg.get("check_shapes", True) and not self._teacher_kl_shapes_checked:
+            self._validate_distribution_params(teacher_distribution_params, student_distribution_params)
+            self._teacher_kl_shapes_checked = True
+
+        if self.teacher_guidance_loss_type == "kl":
+            teacher_loss_for_update, loss_logs = self._compute_kl_teacher_loss(
+                teacher_distribution_params,
+                student_distribution_params,
+            )
+        else:
+            teacher_loss_for_update, loss_logs = self._compute_mean_teacher_loss(
+                teacher_distribution_params,
+                student_distribution_params,
+            )
+
+        raw_teacher_kl = loss_logs.get("teacher_kl")
+        if (
+            raw_teacher_kl is not None
+            and self.teacher_kl_cfg.get("fail_on_nonfinite_kl", True)
+            and not torch.isfinite(raw_teacher_kl)
+        ):
+            raise FloatingPointError(
+                f"Non-finite teacher KL detected: {raw_teacher_kl.item()}. "
+                "Check teacher observation normalization, action distribution parameters, and checkpoint compatibility."
+            )
+        if not torch.isfinite(teacher_loss_for_update):
+            raise FloatingPointError(
+                f"Non-finite teacher guidance loss detected: {teacher_loss_for_update.item()}."
+            )
+
+        teacher_loss = loss_weight * teacher_loss_for_update
+        loss_logs.setdefault("teacher_loss_for_update", teacher_loss_for_update)
+        log_dict = {
+            name: self._distributed_mean_scalar(value).item()
+            for name, value in loss_logs.items()
+        }
+        teacher_loss_log = self._distributed_mean_scalar(teacher_loss).item()
+        log_dict.update(
+            {
+                "teacher_loss": teacher_loss_log,
+                "teacher_lambda": float(loss_weight),
+                "teacher_kl_lambda": float(loss_weight),
+            }
+        )
+        if self.teacher_guidance_loss_type == "kl":
+            log_dict["teacher_kl_loss"] = teacher_loss_log
+        return teacher_loss, log_dict
 
     def update(self) -> dict[str, float]:
         """Run a PPO update and advance the teacher-KL schedule."""
-        loss_dict = super().update()
+        loss_dict = self._update_teacher_imitation_only() if self.teacher_imitation_only else super().update()
         self.teacher_kl_iteration += 1
+        return loss_dict
+
+    def _update_teacher_imitation_only(self) -> dict[str, float]:
+        """Run optimization using only frozen-teacher imitation loss."""
+        if not self.teacher_guidance_enabled:
+            raise RuntimeError("Teacher imitation-only training requires teacher guidance to be enabled.")
+        if self.teacher is None or not self.teacher_loaded:
+            raise RuntimeError("Teacher imitation-only training requires a loaded teacher model.")
+        if self.rnd is not None:
+            raise NotImplementedError("Teacher imitation-only training does not support RND.")
+        if self.symmetry is not None:
+            raise NotImplementedError("Teacher imitation-only training does not support symmetry augmentation.")
+
+        mean_entropy = 0.0
+        mean_teacher_losses: dict[str, float] = {}
+
+        if self.actor.is_recurrent or self.critic.is_recurrent:
+            generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        else:
+            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+
+        for batch in generator:
+            if batch.observations is None:
+                raise RuntimeError("Teacher imitation-only training requires observations in the rollout batch.")
+            original_batch_size = batch.observations.batch_size[0]
+
+            self.actor(
+                batch.observations,
+                masks=batch.masks,
+                hidden_state=batch.hidden_states[0],
+                stochastic_output=True,
+            )
+            distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
+            entropy = self.actor.output_entropy[:original_batch_size]
+
+            loss, loss_logs = self._compute_teacher_guidance_loss(
+                batch,
+                original_batch_size,
+                distribution_params,
+                loss_weight=self.teacher_imitation_loss_coef,
+            )
+
+            self.optimizer.zero_grad()
+            loss.backward()
+
+            if self.is_multi_gpu:
+                self.reduce_parameters()
+
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+            self.optimizer.step()
+
+            mean_entropy += entropy.mean().item()
+            for name, value in loss_logs.items():
+                mean_teacher_losses[name] = mean_teacher_losses.get(name, 0.0) + value
+
+        num_updates = self.num_learning_epochs * self.num_mini_batches
+        mean_entropy /= num_updates
+        for name in mean_teacher_losses:
+            mean_teacher_losses[name] /= num_updates
+
+        loss_dict = {
+            "value": 0.0,
+            "surrogate": 0.0,
+            "entropy": mean_entropy,
+            "teacher_imitation_only": 1.0,
+        }
+        loss_dict.update(mean_teacher_losses)
+        self.storage.clear()
         return loss_dict
 
     def save(self) -> dict:
@@ -366,16 +567,25 @@ class PPOTeacherKL(PPO):
         critic_cfg = copy.deepcopy(cfg["critic"])
         teacher_cfg = copy.deepcopy(cfg.get("teacher", cfg["actor"]))
         obs_groups_cfg = copy.deepcopy(cfg["obs_groups"])
+        teacher_guidance_cfg = algorithm_cfg.get("teacher_kl_cfg") or {}
+        teacher_guidance_enabled = bool(teacher_guidance_cfg.get("enabled", True))
 
         # Resolve class callables
         alg_class: type[PPOTeacherKL] = resolve_callable(algorithm_cfg.pop("class_name"))  # type: ignore
         actor_class: type[MLPModel] = resolve_callable(actor_cfg.pop("class_name"))  # type: ignore
         critic_class: type[MLPModel] = resolve_callable(critic_cfg.pop("class_name"))  # type: ignore
-        teacher_class_name = teacher_cfg.pop("class_name", None)
-        teacher_class: type[MLPModel] = resolve_callable(teacher_class_name) if teacher_class_name else actor_class
+        if teacher_guidance_enabled:
+            teacher_class_name = teacher_cfg.pop("class_name", None)
+            teacher_class: type[MLPModel] | None = (
+                resolve_callable(teacher_class_name) if teacher_class_name else actor_class
+            )
+        else:
+            teacher_class = None
 
         # Resolve observation groups
-        default_sets = ["actor", "critic", "teacher"]
+        default_sets = ["actor", "critic"]
+        if teacher_guidance_enabled:
+            default_sets.append("teacher")
         if "rnd_cfg" in algorithm_cfg and algorithm_cfg["rnd_cfg"] is not None:
             default_sets.append("rnd_state")
         obs_groups = resolve_obs_groups(obs, obs_groups_cfg, default_sets)
@@ -393,10 +603,16 @@ class PPOTeacherKL(PPO):
             critic_cfg["cnns"] = actor.cnns  # type: ignore
         critic: MLPModel = critic_class(obs, obs_groups, "critic", 1, **critic_cfg).to(device)
         print(f"Critic Model: {critic}")
-        teacher: MLPModel = teacher_class(obs, obs_groups, "teacher", env.num_actions, **teacher_cfg).to(device)
-        if teacher.is_recurrent:
-            raise ValueError("PPOTeacherKL currently supports feedforward teacher actors only.")
-        print(f"Teacher Model: {teacher}")
+        teacher: MLPModel | None = None
+        if teacher_guidance_enabled:
+            if teacher_class is None:
+                raise RuntimeError("teacher_class should be resolved when teacher guidance is enabled.")
+            teacher = teacher_class(obs, obs_groups, "teacher", env.num_actions, **teacher_cfg).to(device)
+            if teacher.is_recurrent:
+                raise ValueError("PPOTeacherKL currently supports feedforward teacher actors only.")
+            print(f"Teacher Model: {teacher}")
+        else:
+            print("Teacher guidance disabled: training with PPO loss only.")
 
         # Initialize storage only with groups needed by learnable models. Frozen-teacher-only
         # observations (e.g. depth camera frames) are consumed during rollout and replaced by
@@ -412,8 +628,9 @@ class PPOTeacherKL(PPO):
         alg: PPOTeacherKL = alg_class(
             actor, critic, storage, device=device, **algorithm_cfg, multi_gpu_cfg=cfg["multi_gpu"]
         )
-        alg.teacher = teacher
-        alg.load_teacher_checkpoint()
+        if teacher is not None:
+            alg.teacher = teacher
+            alg.load_teacher_checkpoint()
 
         # Compile the algorithm's learnable models if requested. The teacher remains an uncompiled frozen reference.
         alg.compile(cfg.get("torch_compile_mode"))

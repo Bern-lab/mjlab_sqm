@@ -41,7 +41,7 @@ STAIRS_FLAG_ACTOR_HISTORY_LENGTH = 5  # 历史帧
 STAIRS_FLAG_CRITIC_HISTORY_LENGTH = 3
 
 
-STAIRS_FLAG_TERRAINS_CFG = TerrainGeneratorCfg(
+STAIRS_FLAG_TERRAINS_CFG = TerrainGeneratorCfg(#此任务专属地形
   size=(8.0, 8.0),
   border_width=20.0,
   num_rows=10,
@@ -235,7 +235,7 @@ def _configure_target_heading_command(
     zero_lateral_velocity=True,
     debug_vis=True,
     ranges=TeacherTargetHeadingVelocityCommandCfg.Ranges(
-      lin_vel_x=(0.0, 1.2),
+      lin_vel_x=(0.0, 1.0),
       lin_vel_y=(0.0, 0.0),
       ang_vel_z=(-0.8, 0.8),
       heading=(-math.pi, math.pi),

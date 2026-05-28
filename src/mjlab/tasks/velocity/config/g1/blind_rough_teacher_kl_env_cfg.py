@@ -5,6 +5,7 @@ from copy import deepcopy
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.sensor import CameraSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.terrains.config import BLIND_HIGH_STAIRS_TERRAINS_CFG
 from mjlab.terrains.primitive_terrains import (
@@ -13,6 +14,9 @@ from mjlab.terrains.primitive_terrains import (
 )
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
+from .blind_rough_toe_contact_cfg import (
+  configure_g1_toe_riser_contact_memory_penalty,
+)
 from .env_cfgs import (
   UniformVelocityCommandCfg,
   unitree_g1_rough_env_cfg,
@@ -73,6 +77,7 @@ def _configure_teacherkl_student_env(
   # Keep terrain_scan available for critic/teacher, but make the deployed
   # student actor blind.
   del cfg.observations["actor"].terms["height_scan"]
+  configure_g1_toe_riser_contact_memory_penalty(cfg)
 
   cfg.observations["actor"].history_length = 5  # 5.9: 3; previous: 5
   cfg.observations["critic"].history_length = 3  # 5.9: 3; previous: 1
@@ -111,7 +116,7 @@ def _configure_teacherkl_student_env(
       },
       {
         "step": 3000 * 24,
-        "lin_vel_x": (0.0, 1.2),
+        "lin_vel_x": (0.0, 1.0),
         "lin_vel_y": (0.0, 0.0),
         "ang_vel_z": (-0.8, 0.8),
       },
@@ -161,6 +166,39 @@ def _make_teacher_terms(cfg: ManagerBasedRlEnvCfg) -> dict[str, ObservationTermC
   return terms
 
 
+def _add_teacher_depth_camera(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Add the depth camera observation expected by the frozen teacher."""
+  sensors = tuple(cfg.scene.sensors or ())
+  if not any(getattr(sensor, "name", None) == "front_depth" for sensor in sensors):
+    cfg.scene.sensors = sensors + (
+      CameraSensorCfg(
+        name="front_depth",
+        parent_body="robot/torso_link",
+        pos=(0.10, 0.0, 0.45),
+        quat=(0.95371695, 0.0, -0.30070580, 0.0),
+        fovy=80.0,
+        width=64,
+        height=64,
+        data_types=("depth",),
+        enabled_geom_groups=(0, 2, 3),
+        use_shadows=False,
+        use_textures=True,
+      ),
+    )
+
+  cfg.observations["camera"] = ObservationGroupCfg(
+    terms={
+      "front_depth": ObservationTermCfg(
+        func=mdp.camera_depth,
+        params={"sensor_name": "front_depth", "cutoff_distance": 5.0},
+      ),
+    },
+    concatenate_terms=True,
+    concatenate_dim=0,
+    enable_corruption=False,
+  )
+
+
 def unitree_g1_blind_rough_teacherkl_env_cfg(
   play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
@@ -174,6 +212,7 @@ def unitree_g1_blind_rough_teacherkl_env_cfg(
   """
   cfg = unitree_g1_rough_env_cfg(play=play)
   _configure_teacherkl_student_env(cfg, play=play)
+  _add_teacher_depth_camera(cfg)
 
   cfg.observations["teacher"] = ObservationGroupCfg(
     terms=_make_teacher_terms(cfg),
