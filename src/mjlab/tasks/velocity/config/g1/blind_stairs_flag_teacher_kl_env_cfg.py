@@ -34,11 +34,10 @@ from .blind_rough_toe_contact_cfg import (
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 _STAIR_TERRAIN_NAMES = ("pyramid_stairs",)
-STAIRS_FLAG_ACTOR_HISTORY_LENGTH = 5  # 历史帧
+STAIRS_FLAG_ACTOR_HISTORY_LENGTH = 5
 STAIRS_FLAG_CRITIC_HISTORY_LENGTH = 3
 
-
-STAIRS_FLAG_TERRAINS_CFG = TerrainGeneratorCfg(#此任务专属地形
+STAIRS_FLAG_TERRAINS_CFG = TerrainGeneratorCfg(
   size=(8.0, 8.0),
   border_width=20.0,
   num_rows=10,
@@ -107,15 +106,7 @@ def terrain_is_stairs(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Return a dynamic 1/0 stair flag from the robot's current terrain tile.
-
-  The reset-time terrain type stored in ``terrain.terrain_types`` only describes
-  the tile where each env was spawned.  For the stair-flag tasks we instead want
-  the actor observation and play-time metric to change when the robot walks into
-  another terrain tile.  In curriculum layout, each terrain type occupies one
-  column, so recomputing the current column from the robot world position gives
-  a dynamic flat/stairs label during both training and play.
-  """
+  """Return a dynamic 1/0 stair flag from the robot's current terrain tile."""
   terrain = env.scene.terrain
   if terrain is None or terrain.terrain_origins is None:
     return torch.zeros(env.num_envs, 1, device=env.device)
@@ -144,15 +135,19 @@ def terrain_is_stairs(
   terrain_rows = terrain_rows.clamp(0, num_rows - 1)
   terrain_cols = terrain_cols.clamp(0, num_cols - 1)
 
-  # Curriculum mode uses one column per sub-terrain type.  The stairs-flag train
-  # task has curriculum=True, so this branch makes the label change when the
-  # robot crosses from the flat column into a stair column or back.
+  step_boundary_counts = getattr(terrain, "step_boundary_counts", None)
+  if (
+    step_boundary_counts is not None
+    and step_boundary_counts.numel() > 0
+    and step_boundary_counts.shape[0] == num_rows
+    and step_boundary_counts.shape[1] == num_cols
+  ):
+    is_stairs = step_boundary_counts[terrain_rows, terrain_cols] > 0
+    return is_stairs.float().unsqueeze(-1)
+
   if num_cols == len(sub_terrain_names):
     current_type_ids = terrain_cols
   else:
-    # If a future random-grid terrain stores the sampled type of every tile, use
-    # it.  Otherwise fall back to the reset-time type, which is still safe but
-    # cannot reflect cross-tile walking in arbitrary random layouts.
     terrain_type_grid = getattr(terrain, "terrain_type_grid", None)
     if terrain_type_grid is not None:
       current_type_ids = terrain_type_grid[terrain_rows, terrain_cols]
