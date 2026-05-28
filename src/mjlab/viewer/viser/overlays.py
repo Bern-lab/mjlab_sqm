@@ -155,8 +155,15 @@ class ViserCameraOverlays:
       self.camera_viewers = []
       return
 
+    show_scene_visuals = self.env.unwrapped.cfg.viewer.show_depth_camera_visualizers
     self.camera_viewers = [
-      ViserCameraViewer(self.server, sensor, self.mj_model) for sensor in camera_sensors
+      ViserCameraViewer(
+        self.server,
+        sensor,
+        self.mj_model,
+        show_scene_visuals=show_scene_visuals,
+      )
+      for sensor in camera_sensors
     ]
 
   def update(self, sim_data: Any, env_idx: int, scene_offset: Any) -> None:

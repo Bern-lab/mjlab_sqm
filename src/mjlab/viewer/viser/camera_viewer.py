@@ -54,6 +54,7 @@ class ViserCameraViewer:
     camera_sensor: CameraSensor,
     mj_model: mujoco.MjModel,
     min_display_size: int = 128,
+    show_scene_visuals: bool = True,
   ):
     self._server = server
     self._camera_sensor = camera_sensor
@@ -116,11 +117,11 @@ class ViserCameraViewer:
 
     self._show_frustum_toggle = self._server.gui.add_checkbox(
       label="Frustum",
-      initial_value=True,
+      initial_value=show_scene_visuals,
     )
     self._show_ground_footprint_toggle = self._server.gui.add_checkbox(
       label="Ground Footprint",
-      initial_value=self._has_depth,
+      initial_value=self._has_depth and show_scene_visuals,
     )
     self._footprint_range_slider = self._server.gui.add_slider(
       label="Footprint Range",

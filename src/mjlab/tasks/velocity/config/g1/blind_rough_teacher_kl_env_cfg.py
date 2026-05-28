@@ -223,6 +223,8 @@ def unitree_g1_blind_rough_teacherkl_env_cfg(
   )
 
   if play:
+    cfg.viewer.show_depth_camera_visualizers = False
+
     twist_cmd = cfg.commands["twist"]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
     twist_cmd.ranges.lin_vel_x = (0.5, 1.0)

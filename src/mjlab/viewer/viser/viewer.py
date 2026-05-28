@@ -79,6 +79,7 @@ class ViserPlayViewer(BaseViewer):
     self._camera_overlays: ViserCameraOverlays | None = None
     self._debug_overlays: ViserDebugOverlays | None = None
     self._contact_overlays: ViserContactOverlays | None = None
+    self._terrain_flag_labels: dict[str, Any] = {}
     self._sim_lock = Lock()
     self._camera_update_last_ms: float = 0.0
     self._debug_queue_last_ms: float = 0.0
@@ -109,6 +110,7 @@ class ViserPlayViewer(BaseViewer):
     self._scene.debug_visualization_enabled = (
       True  # Enable debug visualization by default
     )
+    self._create_terrain_flag_labels()
 
     # Create tab group.
     tabs = self._server.gui.add_tab_group()
@@ -368,6 +370,43 @@ class ViserPlayViewer(BaseViewer):
     if self._term_overlays:
       self._term_overlays.update(self._is_paused)
 
+  def _create_terrain_flag_labels(self) -> None:
+    """Create hidden 3D labels for the stair/flat actor flag."""
+    self._terrain_flag_labels = {
+      "0": self._server.scene.add_label(
+        "/overlays/terrain_flag/0",
+        "0",
+        visible=False,
+        font_size_mode="screen",
+        font_screen_scale=3.0,
+        depth_test=False,
+        anchor="center-center",
+      ),
+      "1": self._server.scene.add_label(
+        "/overlays/terrain_flag/1",
+        "1",
+        visible=False,
+        font_size_mode="screen",
+        font_screen_scale=3.0,
+        depth_test=False,
+        anchor="center-center",
+      ),
+    }
+
+  def _update_terrain_flag_marker(self) -> None:
+    """Move the 0/1 terrain flag label to follow the selected robot."""
+    marker = self.get_terrain_flag_marker(self._scene.env_idx)
+    for label in self._terrain_flag_labels.values():
+      label.visible = False
+    if marker is None:
+      return
+
+    scene_offset = getattr(self._scene, "_scene_offset", 0.0)
+    position = marker.position + scene_offset
+    label = self._terrain_flag_labels[marker.text]
+    label.position = tuple(float(v) for v in position)
+    label.visible = True
+
   def _update_camera_feeds(self, sim: Simulation, has_pending_updates: bool) -> None:
     """Push camera sensor frames to GUI when needed."""
     t0 = time.perf_counter()
@@ -502,6 +541,7 @@ class ViserPlayViewer(BaseViewer):
     if self._counter % 10 == 0:
       self._update_status_display()
     self._update_env_dependent_plots()
+    self._update_terrain_flag_marker()
     has_pending_updates = bool(self._pending_update_reasons) or self._scene.needs_update
     self._update_camera_feeds(sim, has_pending_updates)
     # Queue debug visualizers only when a scene update will actually be

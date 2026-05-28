@@ -17,6 +17,7 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from .blind_rough_toe_contact_cfg import (
   configure_g1_toe_riser_contact_memory_penalty,
 )
+from .blind_stairs_flag_teacher_kl_env_cfg import _configure_target_heading_command
 from .env_cfgs import (
   UniformVelocityCommandCfg,
   unitree_g1_rough_env_cfg,
@@ -213,12 +214,9 @@ def unitree_g1_blind_rough_lstm_teacherkl_env_cfg(
     concatenate_dim=0,
     enable_corruption=False,
   )
+  _configure_target_heading_command(cfg, play=play)
 
   if play:
-    twist_cmd = cfg.commands["twist"]
-    assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-    twist_cmd.ranges.lin_vel_x = (0.5, 1.0)
-    twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
-    twist_cmd.ranges.ang_vel_z = (-0.5, 0.5)
+    cfg.viewer.show_depth_camera_visualizers = False
 
   return cfg

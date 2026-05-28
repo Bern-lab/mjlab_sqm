@@ -324,17 +324,67 @@ class NativeMujocoViewer(BaseViewer):
 
   def _update_debug_visualizers(self, viewer: mujoco.viewer.Handle) -> None:
     viewer.user_scn.ngeom = 0
+    assert self.mjm is not None
+    visualizer = MujocoNativeDebugVisualizer(
+      viewer.user_scn, self.mjm, self.env_idx, self._show_all_envs
+    )
     if self._show_debug_vis and hasattr(self.env.unwrapped, "update_visualizers"):
-      assert self.mjm is not None
-      visualizer = MujocoNativeDebugVisualizer(
-        viewer.user_scn, self.mjm, self.env_idx, self._show_all_envs
-      )
       self.env.unwrapped.update_visualizers(visualizer)
       self._update_depth_camera_visualizers(visualizer)
+    self._draw_terrain_flag_marker(visualizer)
+
+  def _draw_terrain_flag_marker(
+    self, visualizer: MujocoNativeDebugVisualizer
+  ) -> None:
+    marker = self.get_terrain_flag_marker(self.env_idx)
+    if marker is None:
+      return
+
+    color = (1.0, 0.58, 0.10, 1.0) if marker.is_stairs else (0.15, 0.85, 0.35, 1.0)
+    center = marker.position
+    visualizer.add_sphere(center, 0.12, (*color[:3], 0.28))
+    if marker.text == "1":
+      self._draw_digit_segments(
+        visualizer,
+        center,
+        color,
+        (
+          ((0.00, -0.25), (0.00, 0.25)),
+          ((-0.07, 0.18), (0.00, 0.25)),
+        ),
+      )
+      return
+
+    self._draw_digit_segments(
+      visualizer,
+      center,
+      color,
+      (
+        ((-0.12, -0.25), (0.12, -0.25)),
+        ((0.12, -0.25), (0.12, 0.25)),
+        ((0.12, 0.25), (-0.12, 0.25)),
+        ((-0.12, 0.25), (-0.12, -0.25)),
+      ),
+    )
+
+  @staticmethod
+  def _draw_digit_segments(
+    visualizer: MujocoNativeDebugVisualizer,
+    center: np.ndarray,
+    color: tuple[float, float, float, float],
+    segments: tuple[tuple[tuple[float, float], tuple[float, float]], ...],
+  ) -> None:
+    for (x0, z0), (x1, z1) in segments:
+      start = center + np.array([x0, 0.0, z0], dtype=np.float32)
+      end = center + np.array([x1, 0.0, z1], dtype=np.float32)
+      visualizer.add_cylinder(start, end, 0.018, color)
 
   def _update_depth_camera_visualizers(
     self, visualizer: MujocoNativeDebugVisualizer
   ) -> None:
+    if not self.cfg.show_depth_camera_visualizers:
+      return
+
     sim_data = self.env.unwrapped.sim.data
     for sensor in self.env.unwrapped.scene.sensors.values():
       if not isinstance(sensor, CameraSensor) or "depth" not in sensor.cfg.data_types:

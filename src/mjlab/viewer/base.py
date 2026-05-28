@@ -78,6 +78,7 @@ from dataclasses import dataclass
 from enum import Enum, IntEnum
 from typing import TYPE_CHECKING, Any, Optional, Protocol
 
+import numpy as np
 import torch
 
 from mjlab.utils.lstm import reset_policy_state, reset_policy_state_from_step
@@ -136,6 +137,13 @@ class TargetHeadingStatus:
   mode: str
   distance_m: float | None
   reached: bool
+
+
+@dataclass(frozen=True)
+class TerrainFlagMarker:
+  text: str
+  is_stairs: bool
+  position: np.ndarray
 
 
 class ViewerAction(Enum):
@@ -514,6 +522,29 @@ class BaseViewer(ABC):
 
     is_stairs = scalar >= 0.5
     return ("Stairs" if is_stairs else "Flat", is_stairs)
+
+  def get_terrain_flag_marker(self, env_idx: int) -> TerrainFlagMarker | None:
+    """Return a floating terrain-flag label using the same obs logic as training."""
+    terrain_status = self.get_terrain_status(env_idx)
+    if terrain_status is None:
+      return None
+
+    env = self.env.unwrapped
+    try:
+      asset = env.scene["robot"]
+      root_pos = asset.data.root_link_pos_w[env_idx].detach().cpu().numpy()
+      heading = float(asset.data.heading_w[env_idx].detach().cpu().item())
+    except Exception:
+      return None
+
+    forward_xy = np.array([np.cos(heading), np.sin(heading), 0.0])
+    position = root_pos - 0.65 * forward_xy + np.array([0.0, 0.0, 1.15])
+    _terrain_label, is_stairs = terrain_status
+    return TerrainFlagMarker(
+      text="1" if is_stairs else "0",
+      is_stairs=is_stairs,
+      position=position.astype(np.float32),
+    )
 
   def get_target_heading_status(self, env_idx: int) -> TargetHeadingStatus | None:
     """Return target-heading command status when the active command exposes it."""

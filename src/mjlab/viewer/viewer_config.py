@@ -31,5 +31,7 @@ class ViewerConfig:
   """Number of neighboring environments to render around ``env_idx``."""
   enable_reflections: bool = True
   enable_shadows: bool = True
+  show_depth_camera_visualizers: bool = True
+  """Show depth-camera frustums and ground projections in play viewers."""
   height: int = 240
   width: int = 320
