@@ -120,7 +120,15 @@ def terrain_is_stairs(
   env: ManagerBasedRlEnv,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-  """Return 1 on stair terrain columns and 0 on flat terrain columns."""
+  """Return a dynamic 1/0 stair flag from the robot's current terrain tile.
+
+  The reset-time terrain type stored in ``terrain.terrain_types`` only describes
+  the tile where each env was spawned.  For the stair-flag tasks we instead want
+  the actor observation and play-time metric to change when the robot walks into
+  another terrain tile.  In curriculum layout, each terrain type occupies one
+  column, so recomputing the current column from the robot world position gives
+  a dynamic flat/stairs label during both training and play.
+  """
   terrain = env.scene.terrain
   if terrain is None or terrain.terrain_origins is None:
     return torch.zeros(env.num_envs, 1, device=env.device)
@@ -130,26 +138,45 @@ def terrain_is_stairs(
     return torch.zeros(env.num_envs, 1, device=env.device)
 
   sub_terrain_names = list(terrain_generator.sub_terrains.keys())
-  stair_cols = [
+  stair_type_ids = [
     i for i, name in enumerate(sub_terrain_names) if name in _STAIR_TERRAIN_NAMES
   ]
-  if not stair_cols:
+  if not stair_type_ids:
     return torch.zeros(env.num_envs, 1, device=env.device)
 
-  num_cols = terrain.terrain_origins.shape[1]
+  asset = env.scene[asset_cfg.name]
+  root_pos_w = asset.data.root_link_pos_w
+
+  num_rows, num_cols = terrain.terrain_origins.shape[:2]
+  tile_size_x, tile_size_y = terrain_generator.size
+  grid_min_x = -0.5 * num_rows * float(tile_size_x)
+  grid_min_y = -0.5 * num_cols * float(tile_size_y)
+
+  terrain_rows = torch.floor((root_pos_w[:, 0] - grid_min_x) / float(tile_size_x)).long()
+  terrain_cols = torch.floor((root_pos_w[:, 1] - grid_min_y) / float(tile_size_y)).long()
+  terrain_rows = terrain_rows.clamp(0, num_rows - 1)
+  terrain_cols = terrain_cols.clamp(0, num_cols - 1)
+
+  # Curriculum mode uses one column per sub-terrain type.  The stairs-flag train
+  # task has curriculum=True, so this branch makes the label change when the
+  # robot crosses from the flat column into a stair column or back.
   if num_cols == len(sub_terrain_names):
-    asset = env.scene[asset_cfg.name]
-    root_y = asset.data.root_link_pos_w[:, 1]
-    tile_width_y = float(terrain_generator.size[1])
-    grid_min_y = -0.5 * num_cols * tile_width_y
-    terrain_cols = torch.floor((root_y - grid_min_y) / tile_width_y).long()
-    terrain_cols = terrain_cols.clamp(0, num_cols - 1)
+    current_type_ids = terrain_cols
   else:
-    terrain_cols = terrain.terrain_types
+    # If a future random-grid terrain stores the sampled type of every tile, use
+    # it.  Otherwise fall back to the reset-time type, which is still safe but
+    # cannot reflect cross-tile walking in arbitrary random layouts.
+    terrain_type_grid = getattr(terrain, "terrain_type_grid", None)
+    if terrain_type_grid is not None:
+      current_type_ids = terrain_type_grid[terrain_rows, terrain_cols]
+    elif hasattr(terrain, "terrain_types"):
+      current_type_ids = terrain.terrain_types
+    else:
+      return torch.zeros(env.num_envs, 1, device=env.device)
 
   is_stairs = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-  for col in stair_cols:
-    is_stairs |= terrain_cols == col
+  for type_id in stair_type_ids:
+    is_stairs |= current_type_ids == type_id
 
   return is_stairs.float().unsqueeze(-1)
 
