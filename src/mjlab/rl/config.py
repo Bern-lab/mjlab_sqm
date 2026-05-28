@@ -91,6 +91,10 @@ class RslRlTeacherKLCfg:
 
   enabled: bool = True
   """Whether to enable frozen-teacher guidance. False makes PPOTeacherKL run as pure PPO."""
+  imitation_only: bool = False
+  """Whether to train only from teacher imitation loss and skip PPO surrogate/value losses."""
+  imitation_loss_coef: float = 1.0
+  """Loss coefficient used when ``imitation_only=True``."""
   checkpoint_path: str | None = None
   """Path to the rsl-rl teacher checkpoint containing ``actor_state_dict``."""
   loss_type: Literal["kl", "mean_mse", "mean_huber"] = "kl"

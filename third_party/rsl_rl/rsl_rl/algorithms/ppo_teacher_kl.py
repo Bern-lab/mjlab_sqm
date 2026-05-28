@@ -45,6 +45,12 @@ class PPOTeacherKL(PPO):
         self.teacher_kl_cfg = dict(teacher_kl_cfg or {})
         self._teacher_kl_shapes_checked = False
         self.teacher_guidance_enabled = bool(self.teacher_kl_cfg.get("enabled", True))
+        self.teacher_imitation_only = bool(self.teacher_kl_cfg.get("imitation_only", False))
+        if self.teacher_imitation_only and not self.teacher_guidance_enabled:
+            raise ValueError("teacher_kl_cfg.imitation_only requires enabled=True.")
+        self.teacher_imitation_loss_coef = float(self.teacher_kl_cfg.get("imitation_loss_coef", 1.0))
+        if self.teacher_imitation_loss_coef <= 0.0:
+            raise ValueError("teacher_kl_cfg.imitation_loss_coef must be positive.")
 
         # Allow checkpoint path to be supplied either inside teacher_kl_cfg or as a direct keyword.
         self.teacher_checkpoint_path: str | None = None
@@ -69,6 +75,8 @@ class PPOTeacherKL(PPO):
         self.teacher_kl_cfg.update(
             {
                 "enabled": self.teacher_guidance_enabled,
+                "imitation_only": self.teacher_imitation_only,
+                "imitation_loss_coef": self.teacher_imitation_loss_coef,
                 "loss_type": self.teacher_guidance_loss_type,
                 "lambda_start": self.teacher_kl_lambda_start,
                 "lambda_end": self.teacher_kl_lambda_end,
@@ -319,6 +327,26 @@ class PPOTeacherKL(PPO):
                 "teacher_kl_lambda": 0.0,
             }
 
+        return self._compute_teacher_guidance_loss(
+            batch,
+            original_batch_size,
+            distribution_params,
+            loss_weight=teacher_kl_lambda,
+        )
+
+    def _compute_teacher_guidance_loss(
+        self,
+        batch: RolloutStorage.Batch,
+        original_batch_size: int,
+        distribution_params: tuple[torch.Tensor, ...],
+        loss_weight: float,
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """Compute teacher guidance loss with an explicit scalar weight."""
+        if self.teacher is None or not self.teacher_loaded:
+            raise RuntimeError("Teacher guidance loss requires a loaded teacher model.")
+        if batch.observations is None:
+            raise RuntimeError("Teacher guidance loss requires observations in the rollout batch.")
+
         observations = batch.observations
         teacher_observations = observations[:original_batch_size]
         teacher_masks = batch.masks[:original_batch_size] if batch.masks is not None else None
@@ -328,7 +356,7 @@ class PPOTeacherKL(PPO):
             teacher_distribution_params = tuple(p.detach() for p in self.teacher.output_distribution_params)
 
         student_distribution_params = distribution_params
-        if teacher_kl_lambda == 0.0:
+        if loss_weight == 0.0:
             student_distribution_params = tuple(p.detach() for p in student_distribution_params)
 
         if self.teacher_kl_cfg.get("check_shapes", True) and not self._teacher_kl_shapes_checked:
@@ -361,7 +389,7 @@ class PPOTeacherKL(PPO):
                 f"Non-finite teacher guidance loss detected: {teacher_loss_for_update.item()}."
             )
 
-        teacher_loss = teacher_kl_lambda * teacher_loss_for_update
+        teacher_loss = loss_weight * teacher_loss_for_update
         loss_logs.setdefault("teacher_loss_for_update", teacher_loss_for_update)
         log_dict = {
             name: self._distributed_mean_scalar(value).item()
@@ -371,8 +399,8 @@ class PPOTeacherKL(PPO):
         log_dict.update(
             {
                 "teacher_loss": teacher_loss_log,
-                "teacher_lambda": float(teacher_kl_lambda),
-                "teacher_kl_lambda": float(teacher_kl_lambda),
+                "teacher_lambda": float(loss_weight),
+                "teacher_kl_lambda": float(loss_weight),
             }
         )
         if self.teacher_guidance_loss_type == "kl":
@@ -381,8 +409,79 @@ class PPOTeacherKL(PPO):
 
     def update(self) -> dict[str, float]:
         """Run a PPO update and advance the teacher-KL schedule."""
-        loss_dict = super().update()
+        if self.teacher_imitation_only:
+            loss_dict = self._update_teacher_imitation_only()
+        else:
+            loss_dict = super().update()
         self.teacher_kl_iteration += 1
+        return loss_dict
+
+    def _update_teacher_imitation_only(self) -> dict[str, float]:
+        """Run optimization using only frozen-teacher imitation loss."""
+        if not self.teacher_guidance_enabled:
+            raise RuntimeError("Teacher imitation-only training requires teacher guidance to be enabled.")
+        if self.teacher is None or not self.teacher_loaded:
+            raise RuntimeError("Teacher imitation-only training requires a loaded teacher model.")
+        if self.rnd is not None:
+            raise NotImplementedError("Teacher imitation-only training does not support RND.")
+        if self.symmetry is not None:
+            raise NotImplementedError("Teacher imitation-only training does not support symmetry augmentation.")
+
+        mean_entropy = 0.0
+        mean_teacher_losses: dict[str, float] = {}
+
+        if self.actor.is_recurrent or self.critic.is_recurrent:
+            generator = self.storage.recurrent_mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        else:
+            generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+
+        for batch in generator:
+            if batch.observations is None:
+                raise RuntimeError("Teacher imitation-only training requires observations in the rollout batch.")
+            original_batch_size = batch.observations.batch_size[0]
+
+            self.actor(
+                batch.observations,
+                masks=batch.masks,
+                hidden_state=batch.hidden_states[0],
+                stochastic_output=True,
+            )
+            distribution_params = tuple(p[:original_batch_size] for p in self.actor.output_distribution_params)
+            entropy = self.actor.output_entropy[:original_batch_size]
+
+            loss, loss_logs = self._compute_teacher_guidance_loss(
+                batch,
+                original_batch_size,
+                distribution_params,
+                loss_weight=self.teacher_imitation_loss_coef,
+            )
+
+            self.optimizer.zero_grad()
+            loss.backward()
+
+            if self.is_multi_gpu:
+                self.reduce_parameters()
+
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+            self.optimizer.step()
+
+            mean_entropy += entropy.mean().item()
+            for name, value in loss_logs.items():
+                mean_teacher_losses[name] = mean_teacher_losses.get(name, 0.0) + value
+
+        num_updates = self.num_learning_epochs * self.num_mini_batches
+        mean_entropy /= num_updates
+        for name in mean_teacher_losses:
+            mean_teacher_losses[name] /= num_updates
+
+        loss_dict = {
+            "value": 0.0,
+            "surrogate": 0.0,
+            "entropy": mean_entropy,
+            "teacher_imitation_only": 1.0,
+        }
+        loss_dict.update(mean_teacher_losses)
+        self.storage.clear()
         return loss_dict
 
     def save(self) -> dict:

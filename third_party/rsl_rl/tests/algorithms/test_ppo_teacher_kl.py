@@ -47,6 +47,17 @@ def _build_teacher_kl(loss_cfg: dict) -> PPOTeacherKL:
     return PPOTeacherKL(actor, critic, storage, teacher_kl_cfg=loss_cfg)
 
 
+def _build_obs() -> TensorDict:
+    return TensorDict(
+        {
+            "actor": torch.randn(NUM_ENVS, OBS_DIM),
+            "critic": torch.randn(NUM_ENVS, OBS_DIM),
+            "teacher": torch.randn(NUM_ENVS, OBS_DIM),
+        },
+        batch_size=[NUM_ENVS],
+    )
+
+
 def test_mean_huber_guidance_ignores_std_mismatch() -> None:
     """Mean-only guidance should not penalize different teacher/student std."""
     alg = _build_teacher_kl({"loss_type": "mean_huber", "huber_delta": 0.5})
@@ -142,3 +153,50 @@ def test_construct_disabled_guidance_skips_teacher_loading() -> None:
     assert alg.teacher_guidance_enabled is False
     assert alg.teacher is None
     assert alg.teacher_loaded is False
+
+
+def test_imitation_only_update_skips_ppo_losses() -> None:
+    """Teacher imitation-only update should optimize only the teacher guidance loss."""
+    alg = _build_teacher_kl(
+        {
+            "loss_type": "mean_huber",
+            "huber_delta": 0.5,
+            "imitation_only": True,
+            "imitation_loss_coef": 1.0,
+        }
+    )
+    obs = _build_obs()
+    obs_groups = {
+        "actor": ["actor"],
+        "critic": ["critic"],
+        "teacher": ["teacher"],
+    }
+    alg.teacher = MLPModel(
+        obs,
+        obs_groups,
+        "teacher",
+        NUM_ACTIONS,
+        hidden_dims=[16],
+        distribution_cfg={"class_name": "GaussianDistribution"},
+    )
+    alg.teacher_loaded = True
+    alg._freeze_teacher()
+    critic_before = [param.detach().clone() for param in alg.critic.parameters()]
+
+    for _ in range(NUM_STEPS):
+        alg.act(obs)
+        alg.process_env_step(
+            obs,
+            rewards=torch.zeros(NUM_ENVS),
+            dones=torch.zeros(NUM_ENVS, dtype=torch.bool),
+            extras={},
+        )
+
+    losses = alg.update()
+
+    assert losses["teacher_imitation_only"] == 1.0
+    assert losses["value"] == 0.0
+    assert losses["surrogate"] == 0.0
+    assert losses["teacher_loss"] > 0.0
+    for before, after in zip(critic_before, alg.critic.parameters()):
+        torch.testing.assert_close(before, after.detach())
