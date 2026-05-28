@@ -7,7 +7,7 @@ import math
 import os
 import sys
 import traceback
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
@@ -100,7 +100,7 @@ class SpawnInfo:
 
 
 def _make_goal_terrain(cfg: GoalPyramidEvalConfig) -> EvalTerrainSpec:
-  return EvalTerrainSpec(
+  terrain = EvalTerrainSpec(
     name="goal_pyramid_stairs",
     label="goal_pyramid_stairs",
     kind="downstairs",
@@ -108,6 +108,9 @@ def _make_goal_terrain(cfg: GoalPyramidEvalConfig) -> EvalTerrainSpec:
     step_width=cfg.step_width,
     platform_width=cfg.platform_width,
     border_width=cfg.terrain_border_width,
+  )
+  return replace(
+    terrain,
     stair_riser_levels=cfg.stair_levels,
     stair_border_width=cfg.flat_apron_width,
   )
