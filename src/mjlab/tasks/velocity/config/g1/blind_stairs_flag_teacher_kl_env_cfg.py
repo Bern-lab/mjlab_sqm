@@ -23,11 +23,8 @@ from mjlab.tasks.velocity.mdp.teacher_target_heading_rewards import (
 )
 from mjlab.tasks.velocity.mdp.velocity_command import UniformVelocityCommandCfg
 from mjlab.terrains import FlatPatchSamplingCfg
-from mjlab.terrains.config import flat, pyramid_stairs, pyramid_stairs_inv
-from mjlab.terrains.primitive_terrains import (
-  BoxInvertedPyramidStairsTerrainCfg,
-  BoxPyramidStairsTerrainCfg,
-)
+from mjlab.terrains.config import flat, pyramid_stairs
+from mjlab.terrains.primitive_terrains import BoxPyramidStairsTerrainCfg
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 
 from .blind_rough_teacher_kl_env_cfg import unitree_g1_blind_rough_teacherkl_env_cfg
@@ -36,7 +33,7 @@ from .blind_rough_toe_contact_cfg import (
 )
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
-_STAIR_TERRAIN_NAMES = ("pyramid_stairs", "pyramid_stairs_inv")
+_STAIR_TERRAIN_NAMES = ("pyramid_stairs",)
 STAIRS_FLAG_ACTOR_HISTORY_LENGTH = 5  # 历史帧
 STAIRS_FLAG_CRITIC_HISTORY_LENGTH = 3
 
@@ -45,19 +42,12 @@ STAIRS_FLAG_TERRAINS_CFG = TerrainGeneratorCfg(#此任务专属地形
   size=(8.0, 8.0),
   border_width=20.0,
   num_rows=10,
-  num_cols=10,
+  num_cols=2,
   curriculum=True,
   sub_terrains={
-    "flat": flat(proportion=0.4),
+    "flat": flat(proportion=0.5),
     "pyramid_stairs": pyramid_stairs(
-      proportion=0.3,
-      step_height_range=(0.04, 0.2),
-      step_width=0.30,
-      platform_width=3.0,
-      border_width=1.0,
-    ),
-    "pyramid_stairs_inv": pyramid_stairs_inv(
-      proportion=0.3,
+      proportion=0.5,
       step_height_range=(0.04, 0.2),
       step_width=0.30,
       platform_width=3.0,
@@ -77,10 +67,7 @@ def _stairs_flag_play_terrain_cfg() -> TerrainGeneratorCfg:
 
   for terrain_name in _STAIR_TERRAIN_NAMES:
     sub_terrain = terrain_cfg.sub_terrains[terrain_name]
-    assert isinstance(
-      sub_terrain,
-      BoxPyramidStairsTerrainCfg | BoxInvertedPyramidStairsTerrainCfg,
-    )
+    assert isinstance(sub_terrain, BoxPyramidStairsTerrainCfg)
     sub_terrain.step_height_range = (0.14, 0.14)
 
   return terrain_cfg
